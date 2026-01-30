@@ -25,11 +25,26 @@ contract PokeDEXCard is
     /// @notice Role for updating card stats (battle arena)
     bytes32 public constant STATS_UPDATER_ROLE = keccak256("STATS_UPDATER_ROLE");
 
+    /// @notice Role for marketplace to set sale prices
+    bytes32 public constant MARKETPLACE_ROLE = keccak256("MARKETPLACE_ROLE");
+
     /// @notice Counter for token IDs
     uint256 private _tokenIdCounter;
 
     /// @notice Mapping from token ID to card stats
     mapping(uint256 => CardStats) private _cardStats;
+
+    /// @notice Trade count per token (incremented on each transfer)
+    mapping(uint256 => uint32) private _tradeCount;
+
+    /// @notice Timestamp when card was acquired by current owner
+    mapping(uint256 => uint48) private _acquiredAt;
+
+    /// @notice Timestamp of last transfer
+    mapping(uint256 => uint48) private _lastTransferAt;
+
+    /// @notice Last sale price in wei (set by marketplace)
+    mapping(uint256 => uint256) private _lastSalePrice;
 
     /// @notice Maximum stats values
     uint16 public constant MAX_STAT = 255;
@@ -225,6 +240,133 @@ contract PokeDEXCard is
         returns (bool)
     {
         return super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @notice Get extended card metrics for battle calculations
+     * @param tokenId Token ID to query
+     * @return CardMetrics struct with trade history
+     */
+    function getCardMetrics(uint256 tokenId)
+        external
+        view
+        override
+        returns (CardMetrics memory)
+    {
+        _requireOwned(tokenId);
+
+        CardStats memory stats = _cardStats[tokenId];
+        uint256 acquiredTime = uint256(_acquiredAt[tokenId]);
+        uint256 holderDays = acquiredTime > 0
+            ? (block.timestamp - acquiredTime) / 1 days
+            : 0;
+
+        return CardMetrics({
+            baseStats: stats,
+            tradeCount: _tradeCount[tokenId],
+            holderDays: holderDays,
+            lastSalePrice: _lastSalePrice[tokenId],
+            isVeteranCard: holderDays > 30
+        });
+    }
+
+    /**
+     * @notice Get trade count for a card
+     * @param tokenId Token ID to query
+     * @return Number of times the card has been traded
+     */
+    function getTradeCount(uint256 tokenId) external view override returns (uint32) {
+        _requireOwned(tokenId);
+        return _tradeCount[tokenId];
+    }
+
+    /**
+     * @notice Set last sale price (called by marketplace after sale)
+     * @param tokenId Token ID to update
+     * @param price Sale price in wei
+     */
+    function setLastSalePrice(uint256 tokenId, uint256 price)
+        external
+        override
+        onlyRole(MARKETPLACE_ROLE)
+    {
+        _requireOwned(tokenId);
+        _lastSalePrice[tokenId] = price;
+    }
+
+    /**
+     * @notice Calculate battle power including trade metrics
+     * @param tokenId Token ID to calculate
+     * @return Enhanced battle power with trade bonuses
+     */
+    function calculateBattlePowerWithMetrics(uint256 tokenId) external view returns (uint256) {
+        _requireOwned(tokenId);
+
+        // Get base battle power
+        CardStats memory stats = _cardStats[tokenId];
+        uint256 basePower = (uint256(stats.hp) * 2) +
+                           (uint256(stats.attack) * 3) +
+                           (uint256(stats.defense) * 2) +
+                           (uint256(stats.speed) * 3);
+
+        uint256 rarityMultiplier = _getRarityMultiplier(stats.rarity);
+
+        // Experience bonus
+        uint256 maxExp = uint256(MAX_EXPERIENCE);
+        uint256 expScaled = uint256(stats.experience) * 50;
+        uint256 baseScaled = 100 * maxExp;
+        uint256 powerWithExp = (basePower * rarityMultiplier * (baseScaled + expScaled)) / (10000 * maxExp);
+
+        // Trade count bonus: +0.5% per trade, max 25%
+        uint32 trades = _tradeCount[tokenId];
+        uint256 tradeBonus = trades > 0
+            ? (powerWithExp * _min(uint256(trades) * 5, 250)) / 1000
+            : 0;
+
+        // Veteran bonus: +10% if held > 30 days
+        uint256 acquiredTime = uint256(_acquiredAt[tokenId]);
+        uint256 holderDays = acquiredTime > 0 ? (block.timestamp - acquiredTime) / 1 days : 0;
+        uint256 veteranBonus = holderDays > 30 ? (powerWithExp * 10) / 100 : 0;
+
+        // Price weight: +1 power per 0.01 ETH of last sale price
+        uint256 priceBonus = _lastSalePrice[tokenId] / 0.01 ether;
+
+        return powerWithExp + tradeBonus + veteranBonus + priceBonus;
+    }
+
+    /**
+     * @dev Override _update to track transfers for trade metrics
+     */
+    function _update(
+        address to,
+        uint256 tokenId,
+        address auth
+    ) internal override returns (address) {
+        address from = _ownerOf(tokenId);
+
+        // Track transfers (not mints or burns)
+        if (from != address(0) && to != address(0) && from != to) {
+            _tradeCount[tokenId]++;
+            _lastTransferAt[tokenId] = uint48(block.timestamp);
+            _acquiredAt[tokenId] = uint48(block.timestamp);
+
+            emit CardTransferred(tokenId, from, to, _tradeCount[tokenId]);
+        }
+
+        // Track acquisition time on mint
+        if (from == address(0) && to != address(0)) {
+            _acquiredAt[tokenId] = uint48(block.timestamp);
+            _lastTransferAt[tokenId] = uint48(block.timestamp);
+        }
+
+        return super._update(to, tokenId, auth);
+    }
+
+    /**
+     * @dev Helper function for minimum of two values
+     */
+    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
     }
 
     /**

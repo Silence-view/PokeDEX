@@ -2,24 +2,50 @@
 .env
 .env.local
 .env.*.local
+*.local
 
 # Node modules
-/node_modules
+node_modules/
 
-# Compilation output
-/dist
+# Build output
+dist/
+build/
+bundle/
 
-# pnpm deploy output
-/bundle
+# Hardhat
+artifacts/
+cache/
+typechain-types/
+coverage/
+coverage.json
 
-# Hardhat Build Artifacts
-/artifacts
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
 
-# Hardhat compilation (v2) support directory
-/cache
+# OS
+.DS_Store
+Thumbs.db
 
-# Typechain output
-/types
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
 
-# Hardhat coverage reports
-/coverage
+# Testing
+.nyc_output/
+
+# User data (SENSITIVE - never commit!)
+data/wallets/
+data/drafts/
+data/sessions/
+data/
+
+# Temporary files
+*.tmp
+*.temp

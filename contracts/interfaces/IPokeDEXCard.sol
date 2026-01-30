@@ -49,6 +49,15 @@ interface IPokeDEXCard {
         uint32 experience;
     }
 
+    /// @notice Extended card metrics for battle calculations
+    struct CardMetrics {
+        CardStats baseStats;
+        uint32 tradeCount;
+        uint256 holderDays;
+        uint256 lastSalePrice;
+        bool isVeteranCard;
+    }
+
     /// @notice Emitted when a new card is minted
     event CardMinted(
         uint256 indexed tokenId,
@@ -59,6 +68,14 @@ interface IPokeDEXCard {
 
     /// @notice Emitted when card stats are updated
     event CardStatsUpdated(uint256 indexed tokenId, uint32 newExperience);
+
+    /// @notice Emitted when a card is transferred (for trade tracking)
+    event CardTransferred(
+        uint256 indexed tokenId,
+        address indexed from,
+        address indexed to,
+        uint32 tradeCount
+    );
 
     /// @notice Get card stats by token ID
     function getCardStats(uint256 tokenId) external view returns (CardStats memory);
@@ -72,4 +89,13 @@ interface IPokeDEXCard {
 
     /// @notice Add experience to a card
     function addExperience(uint256 tokenId, uint32 expAmount) external;
+
+    /// @notice Get extended card metrics for battle formula
+    function getCardMetrics(uint256 tokenId) external view returns (CardMetrics memory);
+
+    /// @notice Get trade count for a card
+    function getTradeCount(uint256 tokenId) external view returns (uint32);
+
+    /// @notice Set last sale price (called by marketplace)
+    function setLastSalePrice(uint256 tokenId, uint256 price) external;
 }

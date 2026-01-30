@@ -1,174 +1,241 @@
-# PokeDEX
+# PokeDEX - Blockchain Trading Card Game
 
-A decentralized Pokemon trading card game built on Ethereum with NFT cards, gacha pack openings, and PvP battles.
+A decentralized Pokemon-style trading card game built on Ethereum with NFT cards, battle arena, marketplace, and Telegram bot integration.
 
-## Overview
+## Features
 
-PokeDEX is a blockchain-based collectible card game featuring:
+- **NFT Trading Cards** - ERC-721 cards with on-chain stats (HP, Attack, Defense, Speed)
+- **Battle Arena** - PvP battles with betting system (0.001-10 ETH) and experience rewards
+- **Marketplace** - List, buy, and sell cards with royalties and fee system
+- **Card Packs** - Random card generation using API3 QRNG for provable fairness
+- **Telegram Bot** - Full-featured bot with custodial wallets for seamless onboarding
 
-- **ERC-721 NFT Cards** - Unique Pokemon cards with stats, types, and rarity levels
-- **Gacha Pack System** - Open card packs with verifiable randomness via Chainlink VRF
-- **PvP Battle Arena** - Challenge other players with type advantages and stat calculations
-- **Experience System** - Cards gain XP from battles, increasing their battle power
+## Architecture
+
+```
+┌─────────────────┐     ┌─────────────────┐     ┌─────────────────┐
+│  Telegram Bot   │────▶│   Smart         │────▶│   Blockchain    │
+│  (Grammy.js)    │     │   Contracts     │     │   (Sepolia)     │
+└─────────────────┘     └─────────────────┘     └─────────────────┘
+        │                       │
+        ▼                       ▼
+┌─────────────────┐     ┌─────────────────┐
+│  Custodial      │     │   IPFS/Pinata   │
+│  Wallets        │     │   (Metadata)    │
+└─────────────────┘     └─────────────────┘
+```
 
 ## Smart Contracts
 
 | Contract | Description |
 |----------|-------------|
-| `PokeDEXCard` | ERC-721 NFT contract for Pokemon cards with stats (HP, Attack, Defense, Speed) |
-| `CardPack` | Pack purchase and opening with Chainlink VRF v2.5 for provably fair randomness |
-| `BattleArena` | PvP battle system with type effectiveness chart and leaderboards |
-
-## Features
+| `PokeDEXCard.sol` | ERC-721 NFT with battle stats, experience system, and trade tracking |
+| `BattleArena.sol` | PvP battle system with betting, 5% platform fee |
+| `PokeDEXMarketplace.sol` | NFT marketplace with listings, offers, and royalties |
+| `CardPack.sol` | Random card pack opening with API3 QRNG |
 
 ### Card System
-- 18 Pokemon types (Fire, Water, Grass, Electric, etc.)
-- 5 rarity levels: Common, Uncommon, Rare, Ultra Rare, Legendary
-- Stats: HP, Attack, Defense, Speed (0-255)
-- Experience system with battle power calculations
-- Generations 1-9 supported
+
+- **18 Pokemon Types**: Fire, Water, Grass, Electric, Ice, Fighting, Poison, Ground, Flying, Psychic, Bug, Rock, Ghost, Dragon, Dark, Steel, Fairy, Normal
+- **5 Rarity Levels**: Common (60%), Uncommon (25%), Rare (10%), Ultra Rare (4%), Legendary (1%)
+- **Stats**: HP, Attack, Defense, Speed (0-255 range)
+- **Experience System**: Cards gain XP from battles
+
+### Battle Power Formula
+
+```
+BattlePower = (HP + Attack + Defense + Speed) × RarityMultiplier
+            + TradeCount × 10
+            + LastSalePrice / 0.01 ETH
+            + RandomFactor
+```
 
 ### Pack Types
-| Pack | Cards | Price | Rarity Boost |
-|------|-------|-------|--------------|
+
+| Pack | Cards | Price | Description |
+|------|-------|-------|-------------|
 | Basic | 3 | 0.01 ETH | Standard rates |
-| Premium | 5 | 0.025 ETH | Standard rates |
-| Legendary | 10 | 0.05 ETH | Standard rates |
-
-### Rarity Distribution
-- Common: 60%
-- Uncommon: 25%
-- Rare: 10%
-- Ultra Rare: 4%
-- Legendary: 1%
-
-### Battle System
-- Turn-based PvP battles
-- Full Pokemon type effectiveness chart
-- Battle power = weighted stats + rarity multiplier + experience bonus
-- Winner earns 100 XP, loser earns 25 XP
-- Global leaderboard (top 100 players)
+| Premium | 5 | 0.025 ETH | Better odds |
+| Legendary | 10 | 0.05 ETH | Best value |
 
 ## Tech Stack
 
-- **Solidity** ^0.8.20
-- **Hardhat** v3.x with Viem
-- **OpenZeppelin** Contracts v5
-- **Chainlink VRF** v2.5
+- **Blockchain**: Solidity 0.8.28, Hardhat, OpenZeppelin 5.x
+- **Backend**: TypeScript, Node.js 18+
+- **Bot Framework**: Grammy.js (Telegram)
+- **Storage**: IPFS via Pinata
+- **Randomness**: API3 QRNG (Airnode)
+- **Encryption**: AES-256-GCM, PBKDF2
 
-## Prerequisites
+## Quick Start
 
-- Node.js v18+
-- pnpm (recommended) or npm
+### Prerequisites
 
-## Installation
+- Node.js 18+
+- pnpm
+- Git
 
-1. Clone the repository:
+### Installation
+
 ```bash
-git clone https://github.com/DvinHartoonian/PokeDex.git
-cd PokeDex
-```
+# Clone the repository
+git clone https://github.com/Silence-view/PokeDEX.git
+cd PokeDEX
 
-2. Install dependencies:
-```bash
+# Install dependencies
 pnpm install
-```
 
-3. Set up environment variables:
-```bash
+# Copy environment file
 cp .env.example .env
-# Edit .env with your configuration
 ```
 
-## Usage
+### Environment Configuration
 
-### Compile Contracts
-```bash
-npx hardhat compile
+```env
+# Blockchain
+SEPOLIA_RPC_URL=https://ethereum-sepolia.publicnode.com
+SEPOLIA_PRIVATE_KEY=your_deployer_private_key
+
+# Telegram Bot
+BOT_TOKEN=your_telegram_bot_token
+
+# Pinata (IPFS)
+PINATA_API_KEY=your_pinata_api_key
+PINATA_SECRET_KEY=your_pinata_secret_key
+
+# Wallet Encryption
+WALLET_MASTER_KEY=your_secure_random_key_32_chars
 ```
 
-### Run Tests
+### Development
+
 ```bash
-# Run all tests
-npx hardhat test
+# Compile contracts
+pnpm run compile
+
+# Run tests (15 tests)
+pnpm test
 
 # Run with gas reporting
-REPORT_GAS=true npx hardhat test
-```
+REPORT_GAS=true pnpm test
 
-### Local Development
-```bash
-# Start local node
-npx hardhat node
+# Deploy to Sepolia
+pnpm run deploy:sepolia
 
-# Deploy to local network
-npx hardhat ignition deploy ignition/modules/PokeDEX.ts --network localhost
-```
-
-### Deploy to Testnet (Sepolia)
-
-1. Set your private key:
-```bash
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
-```
-
-2. Set RPC URL:
-```bash
-npx hardhat keystore set SEPOLIA_RPC_URL
-```
-
-3. Deploy:
-```bash
-npx hardhat ignition deploy ignition/modules/PokeDEX.ts --network sepolia
+# Start Telegram bot
+pnpm run bot
 ```
 
 ## Project Structure
 
 ```
 PokeDEX/
-├── contracts/
-│   ├── PokeDEXCard.sol      # NFT card contract
-│   ├── CardPack.sol         # Pack opening with VRF
-│   ├── BattleArena.sol      # PvP battle system
-│   ├── interfaces/          # Contract interfaces
-│   └── test/                # Mock contracts for testing
-├── scripts/
-│   ├── deploy.ts            # Deployment script
-│   └── verify.ts            # Contract verification
-├── test/
-│   ├── PokeDEXCard.test.ts
-│   ├── CardPack.test.ts
-│   └── BattleArena.test.ts
-└── hardhat.config.ts
+├── contracts/              # Solidity smart contracts
+│   ├── PokeDEXCard.sol     # NFT card contract
+│   ├── BattleArena.sol     # PvP battle system
+│   ├── PokeDEXMarketplace.sol # Marketplace
+│   ├── CardPack.sol        # Pack opening with QRNG
+│   └── interfaces/         # Contract interfaces
+├── telegram/               # Telegram bot
+│   ├── bot.ts              # Main bot logic
+│   ├── storage/            # Session management
+│   └── wallet/             # Custodial wallet system
+├── test/                   # Contract tests
+├── scripts/                # Deployment scripts
+├── hardhat.config.cjs      # Hardhat configuration
+└── SECURITY_AUDIT_REPORT.md # Security audit results
 ```
 
 ## Contract Roles
 
-### PokeDEXCard
-- `DEFAULT_ADMIN_ROLE` - Pause/unpause, manage roles
-- `MINTER_ROLE` - Mint new cards (granted to CardPack)
-- `STATS_UPDATER_ROLE` - Update card experience (granted to BattleArena)
+| Role | Contract | Permissions |
+|------|----------|-------------|
+| `DEFAULT_ADMIN_ROLE` | All | Pause, manage roles, emergency functions |
+| `MINTER_ROLE` | PokeDEXCard | Mint new cards |
+| `STATS_UPDATER_ROLE` | PokeDEXCard | Update card experience |
+| `MARKETPLACE_ROLE` | PokeDEXCard | Update trade metrics |
+| `CONFIG_ROLE` | CardPack | Set prices, URIs |
+| `FEE_MANAGER_ROLE` | Marketplace | Adjust fees |
 
-### CardPack
-- `DEFAULT_ADMIN_ROLE` - Pause/unpause, withdraw funds
-- `CONFIG_ROLE` - Set pack prices, URIs, VRF settings
+## Telegram Bot Commands
 
-### BattleArena
-- `DEFAULT_ADMIN_ROLE` - Pause/unpause, set timeout
-- `REWARDS_ROLE` - Configure experience rewards
+| Command | Description |
+|---------|-------------|
+| `/start` | Initialize bot and create wallet |
+| `/wallet` | View balance, deposit, withdraw |
+| `/create` | Start card creation wizard |
+| `/mycards` | View your NFT collection |
+| `/market` | Browse and buy cards |
+| `/battle` | Challenge other players |
+| `/help` | Show all commands |
 
 ## Security
 
+This project has been audited. See [SECURITY_AUDIT_REPORT.md](./SECURITY_AUDIT_REPORT.md) for full details.
+
+### Security Measures
+
+- AES-256-GCM encryption for wallet storage
+- PBKDF2 key derivation (100,000 iterations, SHA-512)
+- Rate limiting on sensitive operations
 - ReentrancyGuard on all state-changing functions
-- Pausable for emergency stops
-- Access control with OpenZeppelin roles
-- CEI (Checks-Effects-Interactions) pattern
-- Input validation on all parameters
+- Comprehensive input validation
+- Auto-delete for sensitive messages
 
-## License
+### Known Trade-offs (Documented)
 
-MIT
+| Risk | Mitigation |
+|------|------------|
+| Custodial wallets | Users can export keys anytime |
+| On-chain randomness | Betting limits enforced |
+| Front-running | Challenge system requires specific opponent |
+
+## Testing
+
+```bash
+# All tests
+pnpm test
+
+# Specific test
+pnpm test test/Basic.test.cjs
+
+# With coverage
+pnpm run coverage
+```
+
+**Test Results**: 15/15 passing
+
+## Deployment
+
+### Testnet (Sepolia)
+
+```bash
+pnpm run deploy:sepolia
+```
+
+### Contract Verification
+
+```bash
+npx hardhat verify --network sepolia --config hardhat.config.cjs DEPLOYED_ADDRESS
+```
 
 ## Contributing
 
-Contributions are welcome! Please open an issue or submit a pull request.
+1. Fork the repository
+2. Create feature branch (`git checkout -b feature/amazing`)
+3. Commit changes (`git commit -m 'Add amazing feature'`)
+4. Push to branch (`git push origin feature/amazing`)
+5. Open a Pull Request
+
+## License
+
+MIT License - see [LICENSE](./LICENSE) for details.
+
+## Authors
+
+- **Silence-view** - Lead Developer
+- **Dvin Hartoonian** - Co-Developer
+
+---
+
+Built with Solidity, TypeScript, and Grammy.js

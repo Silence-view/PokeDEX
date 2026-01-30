@@ -69,6 +69,28 @@ contract BattleArena is
     address[] public leaderboardAddresses;
     mapping(address => uint256) public leaderboardPosition; // 1-indexed, 0 = not in leaderboard
 
+    // =============================================================================
+    // BETTING SYSTEM
+    // =============================================================================
+
+    /// @notice Mapping from battle ID to bet data
+    mapping(uint256 => BattleBet) public battleBets;
+
+    /// @notice Minimum bet amount (0.001 ETH)
+    uint256 public constant MIN_BET = 0.001 ether;
+
+    /// @notice Maximum bet amount (10 ETH)
+    uint256 public constant MAX_BET = 10 ether;
+
+    /// @notice Betting fee in basis points (500 = 5%)
+    uint256 public bettingFee = 500;
+
+    /// @notice Fee recipient for betting fees
+    address public feeRecipient;
+
+    /// @notice Total fees collected
+    uint256 public totalFeesCollected;
+
     /**
      * @notice Contract constructor
      * @param _cardContract Address of PokeDEXCard contract
@@ -82,6 +104,8 @@ contract BattleArena is
 
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(REWARDS_ROLE, admin);
+
+        feeRecipient = admin;
 
         // Initialize type chart
         _initializeTypeChart();
@@ -195,6 +219,152 @@ contract BattleArena is
         _removeFromArray(pendingChallenges[battle.opponent], battleId);
 
         emit BattleCancelled(battleId);
+
+        // Refund stake if betting was enabled
+        BattleBet storage bet = battleBets[battleId];
+        if (bet.bettingEnabled && bet.challengerStake > 0 && !bet.paid) {
+            bet.paid = true;
+            (bool success, ) = payable(battle.challenger).call{value: bet.challengerStake}("");
+            require(success, "Refund failed");
+        }
+    }
+
+    // =============================================================================
+    // BETTING FUNCTIONS
+    // =============================================================================
+
+    /**
+     * @notice Create a battle challenge with betting stake
+     * @param opponent Opponent's address
+     * @param cardId Challenger's card token ID
+     * @return battleId Created battle ID
+     */
+    function createChallengeWithBet(address opponent, uint256 cardId)
+        external
+        payable
+        override
+        nonReentrant
+        whenNotPaused
+        returns (uint256)
+    {
+        require(msg.value >= MIN_BET, "Stake below minimum");
+        require(msg.value <= MAX_BET, "Stake above maximum");
+        require(opponent != address(0), "Invalid opponent");
+        require(opponent != msg.sender, "Cannot challenge yourself");
+        require(cardContract.ownerOf(cardId) == msg.sender, "Not card owner");
+
+        uint256 battleId = ++_battleIdCounter;
+        require(cardId <= type(uint48).max, "Card ID too large");
+
+        battles[battleId] = Battle({
+            challenger: msg.sender,
+            createdAt: uint48(block.timestamp),
+            status: BattleStatus.Pending,
+            opponent: opponent,
+            completedAt: 0,
+            challengerCardId: uint48(cardId),
+            winner: address(0),
+            opponentCardId: 0,
+            battleId: battleId
+        });
+
+        battleBets[battleId] = BattleBet({
+            challengerStake: msg.value,
+            opponentStake: 0,
+            bettingEnabled: true,
+            paid: false
+        });
+
+        activeChallenges[msg.sender].push(battleId);
+        pendingChallenges[opponent].push(battleId);
+
+        emit BattleCreated(battleId, msg.sender, opponent, cardId);
+        emit BattleBetCreated(battleId, msg.sender, msg.value);
+
+        return battleId;
+    }
+
+    /**
+     * @notice Accept a battle challenge with matching stake
+     * @param battleId Battle ID to accept
+     * @param cardId Opponent's card token ID
+     */
+    function acceptChallengeWithBet(uint256 battleId, uint256 cardId)
+        external
+        payable
+        override
+        nonReentrant
+        whenNotPaused
+    {
+        Battle storage battle = battles[battleId];
+        BattleBet storage bet = battleBets[battleId];
+
+        require(battle.status == BattleStatus.Pending, "Battle not pending");
+        require(battle.opponent == msg.sender, "Not the opponent");
+        require(bet.bettingEnabled, "Not a betting battle");
+        require(msg.value == bet.challengerStake, "Must match challenger stake");
+        require(cardContract.ownerOf(cardId) == msg.sender, "Not card owner");
+        require(
+            block.timestamp <= uint256(battle.createdAt) + challengeTimeout,
+            "Challenge expired"
+        );
+        require(
+            cardContract.ownerOf(uint256(battle.challengerCardId)) == battle.challenger,
+            "Challenger no longer owns card"
+        );
+
+        require(cardId <= type(uint48).max, "Card ID too large");
+        bet.opponentStake = msg.value;
+        battle.opponentCardId = uint48(cardId);
+        battle.status = BattleStatus.Active;
+
+        emit BattleAccepted(battleId, msg.sender, cardId);
+
+        // Execute battle and distribute payouts
+        _executeBattleWithBetting(battleId);
+    }
+
+    /**
+     * @notice Get battle bet details
+     * @param battleId Battle ID to query
+     * @return BattleBet struct
+     */
+    function getBattleBet(uint256 battleId)
+        external
+        view
+        override
+        returns (BattleBet memory)
+    {
+        return battleBets[battleId];
+    }
+
+    /**
+     * @notice Set betting fee (only admin)
+     * @param newFee Fee in basis points (100 = 1%)
+     */
+    function setBettingFee(uint256 newFee) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newFee <= 1000, "Fee too high"); // Max 10%
+        bettingFee = newFee;
+    }
+
+    /**
+     * @notice Set fee recipient
+     * @param newRecipient New fee recipient address
+     */
+    function setFeeRecipient(address newRecipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newRecipient != address(0), "Invalid recipient");
+        feeRecipient = newRecipient;
+    }
+
+    /**
+     * @notice Withdraw collected fees
+     */
+    function withdrawFees() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
+        uint256 amount = totalFeesCollected;
+        require(amount > 0, "No fees to withdraw");
+        totalFeesCollected = 0;
+        (bool success, ) = payable(feeRecipient).call{value: amount}("");
+        require(success, "Withdraw failed");
     }
 
     /**
@@ -399,6 +569,127 @@ contract BattleArena is
         _removeFromArray(pendingChallenges[battle.opponent], battleId);
 
         emit BattleCompleted(battleId, winner, winnerCardId);
+    }
+
+    /**
+     * @dev Execute a battle with betting and distribute payouts
+     * @param battleId Battle ID to execute
+     */
+    function _executeBattleWithBetting(uint256 battleId) internal {
+        Battle storage battle = battles[battleId];
+        BattleBet storage bet = battleBets[battleId];
+
+        uint256 challengerCardId = uint256(battle.challengerCardId);
+        uint256 opponentCardId = uint256(battle.opponentCardId);
+
+        // Get card stats
+        IPokeDEXCard.CardStats memory challengerStats =
+            cardContract.getCardStats(challengerCardId);
+        IPokeDEXCard.CardStats memory opponentStats =
+            cardContract.getCardStats(opponentCardId);
+
+        // Calculate battle power with type advantage and metrics
+        uint256 challengerPower = _calculatePowerWithMetrics(
+            challengerCardId,
+            challengerStats,
+            opponentStats.pokemonType
+        );
+        uint256 opponentPower = _calculatePowerWithMetrics(
+            opponentCardId,
+            opponentStats,
+            challengerStats.pokemonType
+        );
+
+        // Add speed tiebreaker + randomness factor
+        if (challengerPower == opponentPower) {
+            // Use block data for additional randomness in tiebreaker
+            uint256 randomFactor = uint256(keccak256(abi.encodePacked(
+                block.timestamp,
+                block.prevrandao,
+                battleId
+            ))) % 100;
+
+            challengerPower += challengerStats.speed + (randomFactor / 2);
+            opponentPower += opponentStats.speed + (randomFactor % 50);
+        }
+
+        // Determine winner
+        address winner;
+        address loser;
+        uint256 winnerCardId;
+        uint256 loserCardId;
+
+        if (challengerPower >= opponentPower) {
+            winner = battle.challenger;
+            loser = battle.opponent;
+            winnerCardId = challengerCardId;
+            loserCardId = opponentCardId;
+        } else {
+            winner = battle.opponent;
+            loser = battle.challenger;
+            winnerCardId = opponentCardId;
+            loserCardId = challengerCardId;
+        }
+
+        // Update battle state
+        battle.winner = winner;
+        battle.status = BattleStatus.Completed;
+        battle.completedAt = uint48(block.timestamp);
+
+        // Update player stats
+        _updatePlayerStats(winner, loser);
+
+        // Award experience
+        cardContract.addExperience(winnerCardId, winnerExpReward);
+        cardContract.addExperience(loserCardId, loserExpReward);
+
+        // Clean up pending/active arrays
+        _removeFromArray(activeChallenges[battle.challenger], battleId);
+        _removeFromArray(pendingChallenges[battle.opponent], battleId);
+
+        // Process betting payout
+        bet.paid = true;
+        uint256 totalPool = bet.challengerStake + bet.opponentStake;
+        uint256 fee = (totalPool * bettingFee) / 10000;
+        uint256 payout = totalPool - fee;
+
+        totalFeesCollected += fee;
+
+        // Pay winner
+        (bool success, ) = payable(winner).call{value: payout}("");
+        require(success, "Payout failed");
+
+        emit BattleCompleted(battleId, winner, winnerCardId);
+        emit BattlePayout(battleId, winner, payout, fee);
+    }
+
+    /**
+     * @dev Calculate power with type advantage and trade metrics
+     * @param cardId Card token ID
+     * @param stats Card stats
+     * @param defenderType Defender's Pokemon type
+     * @return Modified battle power with metrics
+     */
+    function _calculatePowerWithMetrics(
+        uint256 cardId,
+        IPokeDEXCard.CardStats memory stats,
+        IPokeDEXCard.PokemonType defenderType
+    ) internal view returns (uint256) {
+        // Try to use the new metrics-based calculation
+        try cardContract.calculateBattlePowerWithMetrics(cardId) returns (uint256 power) {
+            uint8 effectiveness = typeChart[stats.pokemonType][defenderType];
+            if (effectiveness == 1) {
+                return (power * 200) / 100;
+            } else if (effectiveness == 2) {
+                return (power * 50) / 100;
+            } else if (effectiveness == 3) {
+                return 0;
+            }
+            return power;
+        } catch {
+            // Fallback to basic calculation
+            return _calculatePowerWithTypeAdvantage(cardId, stats, defenderType);
+        }
     }
 
     /**

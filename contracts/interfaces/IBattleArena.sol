@@ -43,6 +43,29 @@ interface IBattleArena {
         uint32 bestStreak;
     }
 
+    /// @notice Battle bet structure for staking on battles
+    struct BattleBet {
+        uint256 challengerStake;
+        uint256 opponentStake;
+        bool bettingEnabled;
+        bool paid;
+    }
+
+    /// @notice Emitted when a battle with betting is created
+    event BattleBetCreated(
+        uint256 indexed battleId,
+        address indexed challenger,
+        uint256 stake
+    );
+
+    /// @notice Emitted when betting payout is made
+    event BattlePayout(
+        uint256 indexed battleId,
+        address indexed winner,
+        uint256 totalPayout,
+        uint256 fee
+    );
+
     /// @notice Emitted when a battle challenge is created
     event BattleCreated(
         uint256 indexed battleId,
@@ -85,4 +108,13 @@ interface IBattleArena {
 
     /// @notice Get leaderboard
     function getLeaderboard(uint256 limit) external view returns (address[] memory, uint256[] memory);
+
+    /// @notice Create a battle challenge with betting stake
+    function createChallengeWithBet(address opponent, uint256 cardId) external payable returns (uint256 battleId);
+
+    /// @notice Accept a battle challenge with matching stake
+    function acceptChallengeWithBet(uint256 battleId, uint256 cardId) external payable;
+
+    /// @notice Get battle bet details
+    function getBattleBet(uint256 battleId) external view returns (BattleBet memory);
 }
