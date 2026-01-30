@@ -9,8 +9,10 @@ import "./interfaces/IPokeDEXCard.sol";
 
 /**
  * @title PokeDEXCard
- * @dev ERC-721 NFT contract for Pokemon trading cards
- * @notice Main NFT contract with card stats and metadata
+ * @author PokeDEX Team
+ * @dev ERC-721 NFT contract for Pokemon trading cards with built-in stats tracking
+ * @notice Main NFT contract for Pokemon cards with battle stats, trade history, and experience system
+ * @custom:security-contact security@pokedex.example
  */
 contract PokeDEXCard is
     ERC721URIStorage,
@@ -28,6 +30,18 @@ contract PokeDEXCard is
     /// @notice Role for marketplace to set sale prices
     bytes32 public constant MARKETPLACE_ROLE = keccak256("MARKETPLACE_ROLE");
 
+    // =============================================================================
+    // TWO-STEP ADMIN TRANSFER
+    // =============================================================================
+
+    /// @notice Address of pending admin for two-step transfer
+    address public pendingAdmin;
+
+    /// @notice Address of current admin who initiated the transfer
+    address private _transferInitiator;
+
+    // Note: Admin transfer events are inherited from IPokeDEXCard interface
+
     /// @notice Counter for token IDs
     uint256 private _tokenIdCounter;
 
@@ -36,6 +50,9 @@ contract PokeDEXCard is
 
     /// @notice Trade count per token (incremented on each transfer)
     mapping(uint256 => uint32) private _tradeCount;
+
+    /// @notice Maximum trade count to prevent overflow (uint32 max - 1 for safety margin)
+    uint32 public constant MAX_TRADE_COUNT = type(uint32).max - 1;
 
     /// @notice Timestamp when card was acquired by current owner
     mapping(uint256 => uint48) private _acquiredAt;
@@ -178,9 +195,10 @@ contract PokeDEXCard is
     }
 
     /**
-     * @notice Calculate battle power of a card
-     * @param tokenId Token ID to calculate
-     * @return Battle power value
+     * @notice Calculate the battle power of a card based on its stats and rarity
+     * @dev Battle power formula: weighted sum of stats with rarity multiplier and experience bonus
+     * @param tokenId Token ID to calculate battle power for
+     * @return battlePower The calculated battle power value (higher is stronger)
      */
     function calculateBattlePower(uint256 tokenId) external view returns (uint256) {
         _requireOwned(tokenId);
@@ -208,24 +226,72 @@ contract PokeDEXCard is
 
     /**
      * @notice Get total number of cards minted
-     * @return Total supply
+     * @dev This is a simple counter and does not account for burned tokens
+     * @return supply Total number of tokens ever minted
      */
     function totalSupply() external view returns (uint256) {
         return _tokenIdCounter;
     }
 
     /**
-     * @notice Pause contract operations
+     * @notice Pause all minting and stat update operations
+     * @dev Only callable by accounts with DEFAULT_ADMIN_ROLE. Transfers still work when paused.
      */
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
 
     /**
-     * @notice Unpause contract operations
+     * @notice Unpause all contract operations
+     * @dev Only callable by accounts with DEFAULT_ADMIN_ROLE
      */
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
+    }
+
+    // =============================================================================
+    // TWO-STEP ADMIN TRANSFER FUNCTIONS
+    // =============================================================================
+
+    /**
+     * @notice Initiates admin transfer to a new address (step 1)
+     * @dev Only callable by current admin. The new admin must call acceptAdminTransfer() to complete.
+     * @param newAdmin The address to transfer admin role to
+     */
+    function initiateAdminTransfer(address newAdmin) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(newAdmin != address(0), "New admin cannot be zero address");
+        require(newAdmin != msg.sender, "New admin cannot be current admin");
+        pendingAdmin = newAdmin;
+        _transferInitiator = msg.sender;
+        emit AdminTransferInitiated(msg.sender, newAdmin);
+    }
+
+    /**
+     * @notice Completes admin transfer (step 2) - must be called by pending admin
+     * @dev Grants DEFAULT_ADMIN_ROLE to pending admin and revokes from the initiating admin
+     */
+    function acceptAdminTransfer() external {
+        require(msg.sender == pendingAdmin, "Only pending admin can accept");
+        address oldAdmin = _transferInitiator;
+        require(oldAdmin != address(0), "No pending transfer");
+
+        _grantRole(DEFAULT_ADMIN_ROLE, pendingAdmin);
+        _revokeRole(DEFAULT_ADMIN_ROLE, oldAdmin);
+
+        emit AdminTransferCompleted(oldAdmin, pendingAdmin);
+        pendingAdmin = address(0);
+        _transferInitiator = address(0);
+    }
+
+    /**
+     * @notice Cancels pending admin transfer
+     * @dev Only callable by current admin
+     */
+    function cancelAdminTransfer() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        require(pendingAdmin != address(0), "No pending transfer");
+        emit AdminTransferCancelled(msg.sender, pendingAdmin);
+        pendingAdmin = address(0);
+        _transferInitiator = address(0);
     }
 
     /**
@@ -295,9 +361,10 @@ contract PokeDEXCard is
     }
 
     /**
-     * @notice Calculate battle power including trade metrics
-     * @param tokenId Token ID to calculate
-     * @return Enhanced battle power with trade bonuses
+     * @notice Calculate battle power including trade metrics and holding bonuses
+     * @dev Extends base battle power with trade count bonus, veteran bonus, and price weight
+     * @param tokenId Token ID to calculate enhanced battle power for
+     * @return enhancedPower Battle power including all metric-based bonuses
      */
     function calculateBattlePowerWithMetrics(uint256 tokenId) external view returns (uint256) {
         _requireOwned(tokenId);
@@ -336,6 +403,10 @@ contract PokeDEXCard is
 
     /**
      * @dev Override _update to track transfers for trade metrics
+     * @param to Address receiving the token
+     * @param tokenId Token being transferred
+     * @param auth Address authorized for the transfer
+     * @return from The previous owner address
      */
     function _update(
         address to,
@@ -346,7 +417,16 @@ contract PokeDEXCard is
 
         // Track transfers (not mints or burns)
         if (from != address(0) && to != address(0) && from != to) {
-            _tradeCount[tokenId]++;
+            // Overflow protection for trade count
+            uint32 currentTradeCount = _tradeCount[tokenId];
+            if (currentTradeCount < MAX_TRADE_COUNT) {
+                // Safe to increment - no overflow possible
+                unchecked {
+                    _tradeCount[tokenId] = currentTradeCount + 1;
+                }
+            }
+            // If at max, trade count stays at max (no revert to allow transfers)
+
             _lastTransferAt[tokenId] = uint48(block.timestamp);
             _acquiredAt[tokenId] = uint48(block.timestamp);
 
@@ -364,6 +444,9 @@ contract PokeDEXCard is
 
     /**
      * @dev Helper function for minimum of two values
+     * @param a First value to compare
+     * @param b Second value to compare
+     * @return minimum The smaller of the two values
      */
     function _min(uint256 a, uint256 b) internal pure returns (uint256) {
         return a < b ? a : b;

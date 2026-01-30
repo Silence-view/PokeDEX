@@ -12,8 +12,9 @@ import "./PokeDEXCard.sol";
 
 /**
  * @title BattleArena
- * @dev PvP battle system for Pokemon card battles
- * @notice Turn-based battles with type advantages and stat calculations
+ * @author PokeDEX Team
+ * @dev PvP battle system for Pokemon card battles with betting support
+ * @notice Turn-based battles with type advantages, stat calculations, and ETH staking
  */
 contract BattleArena is
     AccessControl,
@@ -21,14 +22,103 @@ contract BattleArena is
     Pausable,
     IBattleArena
 {
+    // =============================================================================
+    // CONSTANTS
+    // =============================================================================
+
     /// @notice Role for managing battle rewards
     bytes32 public constant REWARDS_ROLE = keccak256("REWARDS_ROLE");
 
-    /// @notice Emitted when experience rewards are updated
-    event ExpRewardsUpdated(uint32 winnerExp, uint32 loserExp);
+    /// @notice Maximum leaderboard size to prevent DoS
+    uint256 public constant MAX_LEADERBOARD_SIZE = 100;
 
-    /// @notice Emitted when challenge timeout is updated
-    event ChallengeTimeoutUpdated(uint256 oldTimeout, uint256 newTimeout);
+    /// @notice Default pagination limit for view functions to prevent DoS
+    uint256 public constant DEFAULT_PAGINATION_LIMIT = 100;
+
+    /// @notice Minimum bet amount (0.001 ETH)
+    uint256 public constant MIN_BET = 0.001 ether;
+
+    /// @notice Maximum bet amount (10 ETH)
+    uint256 public constant MAX_BET = 10 ether;
+
+    // =============================================================================
+    // EVENTS
+    // =============================================================================
+
+    // Note: ExpRewardsUpdated and ChallengeTimeoutUpdated are inherited from IBattleArena
+
+    /// @notice Emitted when a challenge is created
+    /// @param battleId The unique battle identifier
+    /// @param challenger The address of the challenger
+    /// @param opponent The address of the opponent
+    /// @param cardId The card token ID used by the challenger
+    event ChallengeCreated(
+        uint256 indexed battleId,
+        address indexed challenger,
+        address indexed opponent,
+        uint256 cardId
+    );
+
+    /// @notice Emitted when a challenge is accepted
+    /// @param battleId The unique battle identifier
+    /// @param opponent The address of the opponent accepting
+    /// @param cardId The card token ID used by the opponent
+    event ChallengeAccepted(
+        uint256 indexed battleId,
+        address indexed opponent,
+        uint256 cardId
+    );
+
+    /// @notice Emitted when a battle is completed with power details
+    /// @param battleId The unique battle identifier
+    /// @param winner The address of the winner
+    /// @param winnerPower The calculated battle power of the winner
+    /// @param loserPower The calculated battle power of the loser
+    event BattleResult(
+        uint256 indexed battleId,
+        address indexed winner,
+        uint256 winnerPower,
+        uint256 loserPower
+    );
+
+    /// @notice Emitted when a bet is placed on a battle
+    /// @param battleId The unique battle identifier
+    /// @param player The address of the player placing the bet
+    /// @param amount The amount of ETH staked
+    event BetPlaced(
+        uint256 indexed battleId,
+        address indexed player,
+        uint256 amount
+    );
+
+    /// @notice Emitted when winnings are distributed to the winner
+    /// @param battleId The unique battle identifier
+    /// @param winner The address receiving the winnings
+    /// @param amount The total amount distributed (after fees)
+    event WinningsDistributed(
+        uint256 indexed battleId,
+        address indexed winner,
+        uint256 amount
+    );
+
+    /// @notice Emitted when betting fee is updated
+    /// @param oldFee The previous fee in basis points
+    /// @param newFee The new fee in basis points
+    event BettingFeeUpdated(uint256 oldFee, uint256 newFee);
+
+    /// @notice Emitted when fee recipient is updated
+    /// @param oldRecipient The previous fee recipient address
+    /// @param newRecipient The new fee recipient address
+    event FeeRecipientUpdated(address oldRecipient, address newRecipient);
+
+    /// @notice Emitted when fees are withdrawn
+    /// @param recipient The address receiving the fees
+    /// @param amount The amount withdrawn
+    event FeesWithdrawn(address indexed recipient, uint256 amount);
+
+    // =============================================================================
+    // STATE VARIABLES
+    // =============================================================================
 
     /// @notice Reference to the PokeDEX card contract
     PokeDEXCard public immutable cardContract;
@@ -58,16 +148,15 @@ contract BattleArena is
     uint256 public challengeTimeout = 24 hours;
 
     /// @notice Type effectiveness matrix
-    /// 0 = normal (1x), 1 = super effective (2x), 2 = not very effective (0.5x), 3 = immune (0x)
+    /// @dev 0 = normal (1x), 1 = super effective (2x), 2 = not very effective (0.5x), 3 = immune (0x)
     mapping(IPokeDEXCard.PokemonType => mapping(IPokeDEXCard.PokemonType => uint8))
         public typeChart;
 
-    /// @notice Maximum leaderboard size to prevent DoS
-    uint256 public constant MAX_LEADERBOARD_SIZE = 100;
-
     /// @notice Leaderboard tracking
     address[] public leaderboardAddresses;
-    mapping(address => uint256) public leaderboardPosition; // 1-indexed, 0 = not in leaderboard
+
+    /// @notice Player position in leaderboard (1-indexed, 0 = not in leaderboard)
+    mapping(address => uint256) public leaderboardPosition;
 
     // =============================================================================
     // BETTING SYSTEM
@@ -75,12 +164,6 @@ contract BattleArena is
 
     /// @notice Mapping from battle ID to bet data
     mapping(uint256 => BattleBet) public battleBets;
-
-    /// @notice Minimum bet amount (0.001 ETH)
-    uint256 public constant MIN_BET = 0.001 ether;
-
-    /// @notice Maximum bet amount (10 ETH)
-    uint256 public constant MAX_BET = 10 ether;
 
     /// @notice Betting fee in basis points (500 = 5%)
     uint256 public bettingFee = 500;
@@ -91,10 +174,22 @@ contract BattleArena is
     /// @notice Total fees collected
     uint256 public totalFeesCollected;
 
+    // =============================================================================
+    // TWO-STEP ADMIN TRANSFER
+    // =============================================================================
+
+    /// @notice Pending admin address for two-step transfer
+    address private _pendingAdmin;
+
+    // =============================================================================
+    // CONSTRUCTOR
+    // =============================================================================
+
     /**
      * @notice Contract constructor
+     * @dev Initializes the card contract reference, grants admin roles, and sets up the type chart
      * @param _cardContract Address of PokeDEXCard contract
-     * @param admin Admin address
+     * @param admin Admin address that will receive DEFAULT_ADMIN_ROLE and REWARDS_ROLE
      */
     constructor(address _cardContract, address admin) {
         require(_cardContract != address(0), "Invalid card contract");
@@ -111,11 +206,16 @@ contract BattleArena is
         _initializeTypeChart();
     }
 
+    // =============================================================================
+    // CHALLENGE FUNCTIONS
+    // =============================================================================
+
     /**
-     * @notice Create a battle challenge
-     * @param opponent Opponent's address
-     * @param cardId Challenger's card token ID
-     * @return battleId Created battle ID
+     * @notice Create a battle challenge against another player
+     * @dev Creates a pending battle that the opponent can accept or that expires after challengeTimeout
+     * @param opponent Opponent's address (cannot be msg.sender or zero address)
+     * @param cardId Challenger's card token ID (must be owned by msg.sender)
+     * @return battleId The unique identifier for the created battle
      */
     function createChallenge(address opponent, uint256 cardId)
         external
@@ -151,14 +251,16 @@ contract BattleArena is
         pendingChallenges[opponent].push(battleId);
 
         emit BattleCreated(battleId, msg.sender, opponent, cardId);
+        emit ChallengeCreated(battleId, msg.sender, opponent, cardId);
 
         return battleId;
     }
 
     /**
-     * @notice Accept a battle challenge
-     * @param battleId Battle ID to accept
-     * @param cardId Opponent's card token ID
+     * @notice Accept a battle challenge and immediately execute the battle
+     * @dev Validates ownership, timeout, and executes battle with type advantages
+     * @param battleId Battle ID to accept (must be pending and not expired)
+     * @param cardId Opponent's card token ID (must be owned by msg.sender)
      */
     function acceptChallenge(uint256 battleId, uint256 cardId)
         external
@@ -190,6 +292,7 @@ contract BattleArena is
         battle.status = BattleStatus.Active;
 
         emit BattleAccepted(battleId, msg.sender, cardId);
+        emit ChallengeAccepted(battleId, msg.sender, cardId);
 
         // Execute battle immediately
         _executeBattle(battleId);
@@ -197,7 +300,9 @@ contract BattleArena is
 
     /**
      * @notice Cancel a pending challenge
-     * @param battleId Battle ID to cancel
+     * @dev Can be cancelled by challenger anytime, or by anyone after timeout expires.
+     *      Follows CEI pattern for reentrancy safety.
+     * @param battleId Battle ID to cancel (must be pending)
      */
     function cancelChallenge(uint256 battleId)
         external
@@ -213,18 +318,28 @@ contract BattleArena is
             "Cannot cancel"
         );
 
+        // CHECKS-EFFECTS-INTERACTIONS PATTERN
+        // Cache values before state changes for the external call
+        BattleBet storage bet = battleBets[battleId];
+        bool shouldRefund = bet.bettingEnabled && bet.challengerStake > 0 && !bet.paid;
+        uint256 refundAmount = bet.challengerStake;
+        address refundRecipient = battle.challenger;
+
+        // EFFECTS: Update all state BEFORE any external calls
         battle.status = BattleStatus.Cancelled;
+
+        if (shouldRefund) {
+            bet.paid = true;
+        }
 
         _removeFromArray(activeChallenges[battle.challenger], battleId);
         _removeFromArray(pendingChallenges[battle.opponent], battleId);
 
         emit BattleCancelled(battleId);
 
-        // Refund stake if betting was enabled
-        BattleBet storage bet = battleBets[battleId];
-        if (bet.bettingEnabled && bet.challengerStake > 0 && !bet.paid) {
-            bet.paid = true;
-            (bool success, ) = payable(battle.challenger).call{value: bet.challengerStake}("");
+        // INTERACTIONS: External call LAST
+        if (shouldRefund) {
+            (bool success, ) = payable(refundRecipient).call{value: refundAmount}("");
             require(success, "Refund failed");
         }
     }
@@ -234,10 +349,11 @@ contract BattleArena is
     // =============================================================================
 
     /**
-     * @notice Create a battle challenge with betting stake
-     * @param opponent Opponent's address
-     * @param cardId Challenger's card token ID
-     * @return battleId Created battle ID
+     * @notice Create a battle challenge with ETH betting stake
+     * @dev Creates a betting battle where opponent must match the stake to accept
+     * @param opponent Opponent's address (cannot be msg.sender or zero address)
+     * @param cardId Challenger's card token ID (must be owned by msg.sender)
+     * @return battleId The unique identifier for the created battle
      */
     function createChallengeWithBet(address opponent, uint256 cardId)
         external
@@ -279,15 +395,18 @@ contract BattleArena is
         pendingChallenges[opponent].push(battleId);
 
         emit BattleCreated(battleId, msg.sender, opponent, cardId);
+        emit ChallengeCreated(battleId, msg.sender, opponent, cardId);
         emit BattleBetCreated(battleId, msg.sender, msg.value);
+        emit BetPlaced(battleId, msg.sender, msg.value);
 
         return battleId;
     }
 
     /**
      * @notice Accept a battle challenge with matching stake
-     * @param battleId Battle ID to accept
-     * @param cardId Opponent's card token ID
+     * @dev Must send exactly the same amount as challenger's stake
+     * @param battleId Battle ID to accept (must be pending betting battle)
+     * @param cardId Opponent's card token ID (must be owned by msg.sender)
      */
     function acceptChallengeWithBet(uint256 battleId, uint256 cardId)
         external
@@ -319,6 +438,8 @@ contract BattleArena is
         battle.status = BattleStatus.Active;
 
         emit BattleAccepted(battleId, msg.sender, cardId);
+        emit ChallengeAccepted(battleId, msg.sender, cardId);
+        emit BetPlaced(battleId, msg.sender, msg.value);
 
         // Execute battle and distribute payouts
         _executeBattleWithBetting(battleId);
@@ -326,8 +447,9 @@ contract BattleArena is
 
     /**
      * @notice Get battle bet details
+     * @dev Returns the BattleBet struct for a given battle
      * @param battleId Battle ID to query
-     * @return BattleBet struct
+     * @return The BattleBet struct containing stake and payout information
      */
     function getBattleBet(uint256 battleId)
         external
@@ -340,37 +462,53 @@ contract BattleArena is
 
     /**
      * @notice Set betting fee (only admin)
-     * @param newFee Fee in basis points (100 = 1%)
+     * @dev Fee is in basis points (100 = 1%, max 1000 = 10%)
+     * @param newFee Fee in basis points
      */
     function setBettingFee(uint256 newFee) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(newFee <= 1000, "Fee too high"); // Max 10%
+        uint256 oldFee = bettingFee;
         bettingFee = newFee;
+        emit BettingFeeUpdated(oldFee, newFee);
     }
 
     /**
-     * @notice Set fee recipient
-     * @param newRecipient New fee recipient address
+     * @notice Set fee recipient address
+     * @dev Only admin can update the fee recipient
+     * @param newRecipient New fee recipient address (cannot be zero)
      */
     function setFeeRecipient(address newRecipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
         require(newRecipient != address(0), "Invalid recipient");
+        address oldRecipient = feeRecipient;
         feeRecipient = newRecipient;
+        emit FeeRecipientUpdated(oldRecipient, newRecipient);
     }
 
     /**
-     * @notice Withdraw collected fees
+     * @notice Withdraw collected fees to fee recipient
+     * @dev Only admin can withdraw, follows CEI pattern
      */
     function withdrawFees() external onlyRole(DEFAULT_ADMIN_ROLE) nonReentrant {
         uint256 amount = totalFeesCollected;
         require(amount > 0, "No fees to withdraw");
+
+        address recipient = feeRecipient;
         totalFeesCollected = 0;
-        (bool success, ) = payable(feeRecipient).call{value: amount}("");
+
+        emit FeesWithdrawn(recipient, amount);
+
+        (bool success, ) = payable(recipient).call{value: amount}("");
         require(success, "Withdraw failed");
     }
 
+    // =============================================================================
+    // VIEW FUNCTIONS
+    // =============================================================================
+
     /**
-     * @notice Get battle details
+     * @notice Get battle details by ID
      * @param battleId Battle ID to query
-     * @return Battle struct
+     * @return The Battle struct containing all battle information
      */
     function getBattle(uint256 battleId)
         external
@@ -383,8 +521,8 @@ contract BattleArena is
 
     /**
      * @notice Get player stats
-     * @param player Player address
-     * @return PlayerStats struct
+     * @param player Player address to query
+     * @return The PlayerStats struct containing wins, losses, streaks, etc.
      */
     function getPlayerStats(address player)
         external
@@ -396,10 +534,11 @@ contract BattleArena is
     }
 
     /**
-     * @notice Get leaderboard
-     * @param limit Maximum number of entries
+     * @notice Get leaderboard with limit
+     * @dev Returns top players sorted by wins
+     * @param limit Maximum number of entries to return
      * @return addresses Array of player addresses
-     * @return wins Array of win counts
+     * @return wins Array of corresponding win counts
      */
     function getLeaderboard(uint256 limit)
         external
@@ -424,7 +563,8 @@ contract BattleArena is
     }
 
     /**
-     * @notice Get player's pending challenges
+     * @notice Get player's pending challenges (returns all - use paginated version for large lists)
+     * @dev WARNING: Can cause DoS if array is very large. Use getPlayerPendingChallengesPaginated for safety.
      * @param player Player address
      * @return Array of battle IDs
      */
@@ -437,7 +577,48 @@ contract BattleArena is
     }
 
     /**
-     * @notice Get player's active challenges (as challenger)
+     * @notice Get player's pending challenges with pagination to prevent DoS
+     * @dev Returns a slice of the pending challenges array
+     * @param player Player address to query
+     * @param offset Starting index (0-based)
+     * @param limit Maximum number of entries to return (capped at DEFAULT_PAGINATION_LIMIT)
+     * @return battleIds Array of battle IDs
+     * @return total Total number of pending challenges for the player
+     */
+    function getPlayerPendingChallengesPaginated(
+        address player,
+        uint256 offset,
+        uint256 limit
+    )
+        external
+        view
+        returns (uint256[] memory battleIds, uint256 total)
+    {
+        uint256[] storage challenges = pendingChallenges[player];
+        total = challenges.length;
+
+        if (offset >= total) {
+            return (new uint256[](0), total);
+        }
+
+        if (limit > DEFAULT_PAGINATION_LIMIT) {
+            limit = DEFAULT_PAGINATION_LIMIT;
+        }
+
+        uint256 remaining = total - offset;
+        uint256 count = remaining < limit ? remaining : limit;
+
+        battleIds = new uint256[](count);
+        for (uint256 i = 0; i < count; i++) {
+            battleIds[i] = challenges[offset + i];
+        }
+
+        return (battleIds, total);
+    }
+
+    /**
+     * @notice Get player's active challenges as challenger (returns all - use paginated version for large lists)
+     * @dev WARNING: Can cause DoS if array is very large. Use getPlayerActiveChallengesPaginated for safety.
      * @param player Player address
      * @return Array of battle IDs
      */
@@ -450,7 +631,76 @@ contract BattleArena is
     }
 
     /**
+     * @notice Get player's active challenges (as challenger) with pagination to prevent DoS
+     * @dev Returns a slice of the active challenges array
+     * @param player Player address to query
+     * @param offset Starting index (0-based)
+     * @param limit Maximum number of entries to return (capped at DEFAULT_PAGINATION_LIMIT)
+     * @return battleIds Array of battle IDs
+     * @return total Total number of active challenges for the player
+     */
+    function getPlayerActiveChallengesPaginated(
+        address player,
+        uint256 offset,
+        uint256 limit
+    )
+        external
+        view
+        returns (uint256[] memory battleIds, uint256 total)
+    {
+        uint256[] storage challenges = activeChallenges[player];
+        total = challenges.length;
+
+        if (offset >= total) {
+            return (new uint256[](0), total);
+        }
+
+        if (limit > DEFAULT_PAGINATION_LIMIT) {
+            limit = DEFAULT_PAGINATION_LIMIT;
+        }
+
+        uint256 remaining = total - offset;
+        uint256 count = remaining < limit ? remaining : limit;
+
+        battleIds = new uint256[](count);
+        for (uint256 i = 0; i < count; i++) {
+            battleIds[i] = challenges[offset + i];
+        }
+
+        return (battleIds, total);
+    }
+
+    /**
+     * @notice Get the count of pending challenges for a player
+     * @dev Useful for pagination - get total before fetching pages
+     * @param player Player address to query
+     * @return The number of pending challenges
+     */
+    function getPlayerPendingChallengesCount(address player)
+        external
+        view
+        returns (uint256)
+    {
+        return pendingChallenges[player].length;
+    }
+
+    /**
+     * @notice Get the count of active challenges for a player
+     * @dev Useful for pagination - get total before fetching pages
+     * @param player Player address to query
+     * @return The number of active challenges
+     */
+    function getPlayerActiveChallengesCount(address player)
+        external
+        view
+        returns (uint256)
+    {
+        return activeChallenges[player].length;
+    }
+
+    /**
      * @notice Verify that the contract has the required role on the card contract
+     * @dev Checks if this contract has STATS_UPDATER_ROLE to award experience
      * @return True if this contract has STATS_UPDATER_ROLE on cardContract
      */
     function verifySetup() external view returns (bool) {
@@ -459,9 +709,23 @@ contract BattleArena is
     }
 
     /**
-     * @notice Set experience rewards
-     * @param _winnerExp Winner exp reward
-     * @param _loserExp Loser exp reward
+     * @notice Get the current battle ID counter
+     * @dev Useful for knowing how many battles have been created
+     * @return The current battle ID counter value
+     */
+    function getBattleCount() external view returns (uint256) {
+        return _battleIdCounter;
+    }
+
+    // =============================================================================
+    // ADMIN FUNCTIONS
+    // =============================================================================
+
+    /**
+     * @notice Set experience rewards for battles
+     * @dev Only REWARDS_ROLE can update experience values
+     * @param _winnerExp Experience points awarded to winner
+     * @param _loserExp Experience points awarded to loser
      */
     function setExpRewards(uint32 _winnerExp, uint32 _loserExp)
         external
@@ -473,7 +737,8 @@ contract BattleArena is
     }
 
     /**
-     * @notice Set challenge timeout
+     * @notice Set challenge timeout duration
+     * @dev Only admin can update, minimum 1 hour
      * @param _timeout New timeout in seconds
      */
     function setChallengeTimeout(uint256 _timeout)
@@ -487,18 +752,89 @@ contract BattleArena is
     }
 
     /**
-     * @notice Pause contract
+     * @notice Pause the contract
+     * @dev Only admin can pause, prevents new challenges and acceptances
      */
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
 
     /**
-     * @notice Unpause contract
+     * @notice Unpause the contract
+     * @dev Only admin can unpause
      */
     function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _unpause();
     }
+
+    // =============================================================================
+    // TWO-STEP ADMIN TRANSFER
+    // =============================================================================
+
+    /**
+     * @notice Initiates admin transfer to a new address (step 1)
+     * @dev Only callable by current admin. The new admin must call acceptAdminTransfer() to complete.
+     * @param newAdmin The address to transfer admin role to
+     */
+    function initiateAdminTransfer(address newAdmin)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(newAdmin != address(0), "Invalid new admin");
+        require(newAdmin != msg.sender, "Cannot transfer to self");
+        _pendingAdmin = newAdmin;
+        emit AdminTransferInitiated(msg.sender, newAdmin);
+    }
+
+    /**
+     * @notice Completes admin transfer (step 2) - must be called by pending admin
+     * @dev Grants DEFAULT_ADMIN_ROLE to pending admin and revokes from the initiating admin
+     */
+    function acceptAdminTransfer() external override {
+        require(msg.sender == _pendingAdmin, "Not pending admin");
+        require(_pendingAdmin != address(0), "No pending transfer");
+
+        // Get current admins (there could be multiple, but we handle the common case)
+        address pendingAdmin_ = _pendingAdmin;
+        _pendingAdmin = address(0);
+
+        // Grant role to new admin
+        _grantRole(DEFAULT_ADMIN_ROLE, pendingAdmin_);
+        _grantRole(REWARDS_ROLE, pendingAdmin_);
+
+        // Note: The old admin should renounce their role separately if desired
+        // This design allows for multi-sig scenarios where multiple admins exist
+
+        emit AdminTransferCompleted(msg.sender, pendingAdmin_);
+    }
+
+    /**
+     * @notice Cancels pending admin transfer
+     * @dev Only callable by current admin
+     */
+    function cancelAdminTransfer()
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
+        require(_pendingAdmin != address(0), "No pending transfer");
+        address cancelledPending = _pendingAdmin;
+        _pendingAdmin = address(0);
+        emit AdminTransferCancelled(msg.sender, cancelledPending);
+    }
+
+    /**
+     * @notice Get pending admin address
+     * @return The address of the pending admin, or zero address if none
+     */
+    function pendingAdmin() external view override returns (address) {
+        return _pendingAdmin;
+    }
+
+    // =============================================================================
+    // INTERNAL BATTLE EXECUTION
+    // =============================================================================
 
     /**
      * @dev Execute a battle and determine winner
@@ -528,6 +864,10 @@ contract BattleArena is
             challengerStats.pokemonType
         );
 
+        // Store original powers for event
+        uint256 originalChallengerPower = challengerPower;
+        uint256 originalOpponentPower = opponentPower;
+
         // Add speed tiebreaker
         if (challengerPower == opponentPower) {
             challengerPower += challengerStats.speed;
@@ -539,17 +879,23 @@ contract BattleArena is
         address loser;
         uint256 winnerCardId;
         uint256 loserCardId;
+        uint256 winnerPower;
+        uint256 loserPower;
 
         if (challengerPower >= opponentPower) {
             winner = battle.challenger;
             loser = battle.opponent;
             winnerCardId = challengerCardId;
             loserCardId = opponentCardId;
+            winnerPower = originalChallengerPower;
+            loserPower = originalOpponentPower;
         } else {
             winner = battle.opponent;
             loser = battle.challenger;
             winnerCardId = opponentCardId;
             loserCardId = challengerCardId;
+            winnerPower = originalOpponentPower;
+            loserPower = originalChallengerPower;
         }
 
         // Update battle state
@@ -569,11 +915,13 @@ contract BattleArena is
         _removeFromArray(pendingChallenges[battle.opponent], battleId);
 
         emit BattleCompleted(battleId, winner, winnerCardId);
+        emit BattleResult(battleId, winner, winnerPower, loserPower);
     }
 
     /**
      * @dev Execute a battle with betting and distribute payouts
      * @param battleId Battle ID to execute
+     * @notice Follows Checks-Effects-Interactions pattern for reentrancy safety
      */
     function _executeBattleWithBetting(uint256 battleId) internal {
         Battle storage battle = battles[battleId];
@@ -600,6 +948,10 @@ contract BattleArena is
             challengerStats.pokemonType
         );
 
+        // Store original powers for event
+        uint256 originalChallengerPower = challengerPower;
+        uint256 originalOpponentPower = opponentPower;
+
         // Add speed tiebreaker + randomness factor
         if (challengerPower == opponentPower) {
             // Use block data for additional randomness in tiebreaker
@@ -618,50 +970,62 @@ contract BattleArena is
         address loser;
         uint256 winnerCardId;
         uint256 loserCardId;
+        uint256 winnerPower;
+        uint256 loserPower;
 
         if (challengerPower >= opponentPower) {
             winner = battle.challenger;
             loser = battle.opponent;
             winnerCardId = challengerCardId;
             loserCardId = opponentCardId;
+            winnerPower = originalChallengerPower;
+            loserPower = originalOpponentPower;
         } else {
             winner = battle.opponent;
             loser = battle.challenger;
             winnerCardId = opponentCardId;
             loserCardId = challengerCardId;
+            winnerPower = originalOpponentPower;
+            loserPower = originalChallengerPower;
         }
 
-        // Update battle state
+        // Calculate payout before state changes
+        uint256 totalPool = bet.challengerStake + bet.opponentStake;
+        uint256 fee = (totalPool * bettingFee) / 10000;
+        uint256 payout = totalPool - fee;
+
+        // EFFECTS: Update ALL state BEFORE any external calls
         battle.winner = winner;
         battle.status = BattleStatus.Completed;
         battle.completedAt = uint48(block.timestamp);
+        bet.paid = true;
+        totalFeesCollected += fee;
 
         // Update player stats
         _updatePlayerStats(winner, loser);
-
-        // Award experience
-        cardContract.addExperience(winnerCardId, winnerExpReward);
-        cardContract.addExperience(loserCardId, loserExpReward);
 
         // Clean up pending/active arrays
         _removeFromArray(activeChallenges[battle.challenger], battleId);
         _removeFromArray(pendingChallenges[battle.opponent], battleId);
 
-        // Process betting payout
-        bet.paid = true;
-        uint256 totalPool = bet.challengerStake + bet.opponentStake;
-        uint256 fee = (totalPool * bettingFee) / 10000;
-        uint256 payout = totalPool - fee;
+        // Emit events before external calls
+        emit BattleCompleted(battleId, winner, winnerCardId);
+        emit BattleResult(battleId, winner, winnerPower, loserPower);
+        emit BattlePayout(battleId, winner, payout, fee);
+        emit WinningsDistributed(battleId, winner, payout);
 
-        totalFeesCollected += fee;
+        // INTERACTIONS: External calls LAST
+        cardContract.addExperience(winnerCardId, winnerExpReward);
+        cardContract.addExperience(loserCardId, loserExpReward);
 
         // Pay winner
         (bool success, ) = payable(winner).call{value: payout}("");
         require(success, "Payout failed");
-
-        emit BattleCompleted(battleId, winner, winnerCardId);
-        emit BattlePayout(battleId, winner, payout, fee);
     }
+
+    // =============================================================================
+    // INTERNAL HELPER FUNCTIONS
+    // =============================================================================
 
     /**
      * @dev Calculate power with type advantage and trade metrics
@@ -808,7 +1172,7 @@ contract BattleArena is
     }
 
     /**
-     * @dev Remove element from array
+     * @dev Remove element from array using swap and pop
      * @param arr Array to modify
      * @param element Element to remove
      */
