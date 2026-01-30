@@ -205,6 +205,14 @@ interface IPokeDEXCard {
      */
     function totalSupply() external view returns (uint256 supply);
 
+    /**
+     * @notice Get all token IDs owned by an address
+     * @dev Used by frontend/bot to display user's card collection
+     * @param owner Address to query
+     * @return Array of token IDs owned by the address
+     */
+    function tokensOfOwner(address owner) external view returns (uint256[] memory);
+
     // =============================================================================
     // ADMIN FUNCTIONS
     // =============================================================================

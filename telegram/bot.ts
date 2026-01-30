@@ -97,6 +97,85 @@ const WALLETS_DIR = path.resolve(__dirname, "../data/wallets");
 const WALLET_MASTER_KEY = process.env.WALLET_MASTER_KEY || "default-master-key-change-in-production";
 
 // =============================================================================
+// WALLET ADDRESS HELPER
+// =============================================================================
+
+interface WalletAddressInfo {
+  address: string;
+  balance: string;
+  balanceFormatted: string;
+}
+
+/**
+ * Gets the user's wallet address, prioritizing custodial wallet
+ * @param userId Telegram user ID
+ * @returns Wallet address or null if none exists
+ */
+async function getUserWalletAddress(userId: number): Promise<string | null> {
+  // Try custodial wallet first
+  try {
+    const walletManager = getWalletManager();
+    if (walletManager.hasWallet(userId)) {
+      const walletInfo = await walletManager.getWallet(userId);
+      if (walletInfo?.address) {
+        return walletInfo.address;
+      }
+    }
+  } catch (error) {
+    console.error("Error checking custodial wallet:", error);
+  }
+
+  // Fall back to session wallet
+  const session = sessionStore.get(userId);
+  return session?.walletAddress || null;
+}
+
+/**
+ * Gets the user's wallet address with balance info, prioritizing custodial wallet
+ * @param userId Telegram user ID
+ * @returns Wallet info with address and balance, or null if none exists
+ */
+async function getUserWalletWithBalance(userId: number): Promise<WalletAddressInfo | null> {
+  // Try custodial wallet first
+  try {
+    const walletManager = getWalletManager();
+    if (walletManager.hasWallet(userId)) {
+      const walletInfo = await walletManager.getWallet(userId);
+      if (walletInfo?.address) {
+        return {
+          address: walletInfo.address,
+          balance: walletInfo.balance,
+          balanceFormatted: walletInfo.balanceFormatted
+        };
+      }
+    }
+  } catch (error) {
+    console.error("Error checking custodial wallet:", error);
+  }
+
+  // Fall back to session wallet (no balance info available)
+  const session = sessionStore.get(userId);
+  if (session?.walletAddress) {
+    try {
+      const balance = await provider.getBalance(session.walletAddress);
+      return {
+        address: session.walletAddress,
+        balance: balance.toString(),
+        balanceFormatted: ethers.formatEther(balance)
+      };
+    } catch {
+      return {
+        address: session.walletAddress,
+        balance: "0",
+        balanceFormatted: "0"
+      };
+    }
+  }
+
+  return null;
+}
+
+// =============================================================================
 // RARITY SYSTEM - Stats generated based on rarity tier
 // =============================================================================
 
@@ -261,7 +340,8 @@ const CARD_ABI = [
   "function tokenURI(uint256 tokenId) view returns (string)",
   "function getCardStats(uint256 tokenId) view returns (tuple(uint16 hp, uint16 attack, uint16 defense, uint16 speed, uint8 pokemonType, uint8 rarity, uint8 generation, uint32 experience))",
   "function calculateBattlePower(uint256 tokenId) view returns (uint256)",
-  "function totalSupply() view returns (uint256)"
+  "function totalSupply() view returns (uint256)",
+  "function tokensOfOwner(address owner) view returns (uint256[])"
 ];
 
 const PACK_ABI = [
@@ -1020,26 +1100,11 @@ ${typeEmoji} Type: ${type} (random)
 ❤️ HP: ${draft.stats.hp} | ⚔️ ATK: ${draft.stats.attack}
 🛡️ DEF: ${draft.stats.defense} | 💨 SPD: ${draft.stats.speed}`, { parse_mode: "Markdown" });
 
-  // ========== STEP 4: Price ==========
-  await ctx.reply("💰 Sale price in ETH? (e.g.: 0.01, 0.05, 0.1)");
+  // Set default royalty (price is set later when listing on marketplace)
+  draft.royaltyPercentage = 500; // Default 5% royalty
+  draftStore.save(draft);
 
-  let validPrice = false;
-  while (!validPrice) {
-    const priceCtx = await conversation.wait();
-    const priceText = priceCtx.message?.text || "";
-    const price = parseFloat(priceText);
-
-    if (!isNaN(price) && price > 0 && price < 1000) {
-      draft.priceInEth = priceText;
-      draft.royaltyPercentage = 500; // Default 5% royalty
-      draftStore.save(draft);
-      validPrice = true;
-    } else {
-      await ctx.reply("❌ Invalid. Enter a number like: 0.01, 0.05, 0.1");
-    }
-  }
-
-  // ========== STEP 5: Upload to IPFS and deploy on-chain ==========
+  // ========== STEP 4: Upload to IPFS and deploy on-chain ==========
   const statusMsg = await ctx.reply("📤 *Step 1/3:* Uploading image to IPFS...", { parse_mode: "Markdown" });
 
   try {
@@ -1100,10 +1165,8 @@ ${typeEmoji} *Type:* ${type}
 
 🆔 *Token ID:* #${deployResult.tokenId || "pending"}
 📜 *TX:* \`${deployResult.txHash?.slice(0, 20)}...\`
-💰 *Price:* ${draft.priceInEth} ETH
-📈 *Royalty:* ${draft.royaltyPercentage / 100}%
 
-Your card is ready! List it on the marketplace to sell.`, {
+🛒 Ready to sell? Use the Marketplace to list your card!`, {
         parse_mode: "Markdown",
         reply_markup: successKeyboard
       });
@@ -1495,36 +1558,64 @@ async function showMyCards(ctx: MyContext) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const session = sessionStore.get(userId);
-  if (!session?.walletAddress) {
-    await ctx.reply("❌ Connect your wallet first!", {
-      reply_markup: new InlineKeyboard().text("👛 Connect Wallet", "action_wallet")
+  const walletAddress = await getUserWalletAddress(userId);
+  if (!walletAddress) {
+    await ctx.reply("❌ Create or connect your wallet first!", {
+      reply_markup: new InlineKeyboard().text("👛 Wallet", "action_wallet")
     });
     return;
   }
 
   if (!cardContract) {
-    await ctx.reply("❌ Cards contract not configured.");
+    await ctx.reply("❌ Card contract not configured.");
     return;
   }
 
   try {
-    const balance = await cardContract.balanceOf(session.walletAddress);
+    // Get user's token IDs
+    const tokenIds = await cardContract.tokensOfOwner(walletAddress);
 
-    if (balance === BigInt(0)) {
-      await ctx.reply("📭 You don't have any cards yet!\n\nBuy some packs to start your collection!", {
-        reply_markup: new InlineKeyboard().text("📦 Buy Packs", "action_buy_packs")
+    if (tokenIds.length === 0) {
+      await ctx.reply("📭 You don't have any cards yet!\n\nCreate your first card or buy packs.", {
+        reply_markup: new InlineKeyboard()
+          .text("🎨 Create Card", "action_create_card")
+          .text("📦 Buy Packs", "action_buy_packs")
       });
       return;
     }
 
-    await ctx.reply(
-      `🎴 *Your Collection*\n\nYou have *${balance}* card(s).\n\nUse \`/card <ID>\` to see details.`,
-      { parse_mode: "Markdown" }
-    );
+    // Build card list with inline buttons
+    let message = `🎴 <b>Your Collection</b>\n\n`;
+    message += `You have <b>${tokenIds.length}</b> card(s):\n\n`;
+
+    const keyboard = new InlineKeyboard();
+
+    // Show up to 10 cards
+    const cardsToShow = tokenIds.slice(0, 10);
+    for (const tokenId of cardsToShow) {
+      try {
+        const stats = await cardContract.getCardStats(tokenId);
+        const rarityNames = ["Common", "Uncommon", "Rare", "Ultra Rare", "Legendary"];
+        const rarity = rarityNames[stats.rarity] || "Unknown";
+        message += `• Card #${tokenId} - ${rarity}\n`;
+        keyboard.text(`#${tokenId}`, `view_card_${tokenId}`).row();
+      } catch {
+        message += `• Card #${tokenId}\n`;
+        keyboard.text(`#${tokenId}`, `view_card_${tokenId}`).row();
+      }
+    }
+
+    if (tokenIds.length > 10) {
+      message += `\n... and ${tokenIds.length - 10} more`;
+    }
+
+    await ctx.reply(message, {
+      parse_mode: "HTML",
+      reply_markup: keyboard
+    });
   } catch (error) {
-    console.error("Error:", error);
-    await ctx.reply("❌ Error fetching cards.");
+    console.error("Error fetching cards:", error);
+    await ctx.reply("❌ Error loading your cards. Please try again.");
   }
 }
 
@@ -1540,8 +1631,8 @@ async function showCardDetails(ctx: MyContext, cardId: number) {
     const power = await cardContract.calculateBattlePower(cardId);
 
     const userId = ctx.from?.id;
-    const session = userId ? sessionStore.get(userId) : null;
-    const isOwner = session?.walletAddress?.toLowerCase() === owner.toLowerCase();
+    const walletAddress = userId ? await getUserWalletAddress(userId) : null;
+    const isOwner = walletAddress?.toLowerCase() === owner.toLowerCase();
 
     const keyboard = isOwner && CONTRACTS.MARKETPLACE
       ? new InlineKeyboard().text("🛒 Sell", `sell_card_${cardId}`)
@@ -1604,20 +1695,7 @@ async function showMyCreations(ctx: MyContext) {
     return;
   }
 
-  // Get wallet address - check custodial wallet first, then session wallet
-  let walletAddress: string | undefined;
-  const walletManager = getWalletManager();
-
-  if (walletManager.hasWallet(userId)) {
-    const walletInfo = await walletManager.getWallet(userId);
-    walletAddress = walletInfo?.address;
-  }
-
-  if (!walletAddress) {
-    const session = sessionStore.get(userId);
-    walletAddress = session?.walletAddress;
-  }
-
+  const walletAddress = await getUserWalletAddress(userId);
   if (!walletAddress) {
     await ctx.reply("❌ You need to create or connect a wallet first!", {
       reply_markup: new InlineKeyboard().text("👛 Wallet", "action_wallet")
@@ -1831,14 +1909,21 @@ async function showMyListings(ctx: MyContext) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const session = sessionStore.get(userId);
-  if (!session?.walletAddress || !marketplaceContract) {
-    await ctx.reply("❌ Connect wallet or wait for deployment!");
+  if (!marketplaceContract) {
+    await ctx.reply("❌ Marketplace contract not configured.");
+    return;
+  }
+
+  const walletAddress = await getUserWalletAddress(userId);
+  if (!walletAddress) {
+    await ctx.reply("❌ Create or connect your wallet first!", {
+      reply_markup: new InlineKeyboard().text("👛 Wallet", "action_wallet")
+    });
     return;
   }
 
   try {
-    const listingIds = await marketplaceContract.getSellerListings(session.walletAddress);
+    const listingIds = await marketplaceContract.getSellerListings(walletAddress);
 
     if (listingIds.length === 0) {
       await ctx.reply("📭 You don't have any active listings!", {
@@ -1906,10 +1991,10 @@ async function showBattleMenu(ctx: MyContext) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const session = sessionStore.get(userId);
-  if (!session?.walletAddress) {
-    await ctx.reply("❌ Connect your wallet first!", {
-      reply_markup: new InlineKeyboard().text("👛 Connect Wallet", "action_wallet")
+  const walletAddress = await getUserWalletAddress(userId);
+  if (!walletAddress) {
+    await ctx.reply("❌ Create or connect your wallet first!", {
+      reply_markup: new InlineKeyboard().text("👛 Wallet", "action_wallet")
     });
     return;
   }
@@ -1956,13 +2041,13 @@ async function showLeaderboard(ctx: MyContext) {
     }
 
     const userId = ctx.from?.id;
-    const session = userId ? sessionStore.get(userId) : null;
+    const walletAddress = userId ? await getUserWalletAddress(userId) : null;
 
     let text = "🏆 *Top 10 Trainers*\n\n";
 
     for (let i = 0; i < addresses.length; i++) {
       const medal = i === 0 ? "🥇" : i === 1 ? "🥈" : i === 2 ? "🥉" : `${i + 1}.`;
-      const isYou = session?.walletAddress?.toLowerCase() === addresses[i].toLowerCase();
+      const isYou = walletAddress?.toLowerCase() === addresses[i].toLowerCase();
       text += `${medal} \`${formatAddress(addresses[i])}\` - ${wins[i]} wins${isYou ? " *(You)*" : ""}\n`;
     }
 
@@ -1977,19 +2062,21 @@ async function showPlayerStats(ctx: MyContext) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const session = sessionStore.get(userId);
-  if (!session?.walletAddress) {
-    await ctx.reply("❌ Connect your wallet first!");
-    return;
-  }
-
   if (!battleContract) {
     await ctx.reply("❌ Arena not deployed!");
     return;
   }
 
+  const walletAddress = await getUserWalletAddress(userId);
+  if (!walletAddress) {
+    await ctx.reply("❌ Create or connect your wallet first!", {
+      reply_markup: new InlineKeyboard().text("👛 Wallet", "action_wallet")
+    });
+    return;
+  }
+
   try {
-    const stats = await battleContract.getPlayerStats(session.walletAddress);
+    const stats = await battleContract.getPlayerStats(walletAddress);
     const winRate = stats.totalBattles > 0
       ? ((Number(stats.wins) / Number(stats.totalBattles)) * 100).toFixed(1)
       : "0";
@@ -2178,14 +2265,21 @@ bot.callbackQuery("action_my_offers", async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const session = sessionStore.get(userId);
-  if (!session?.walletAddress || !marketplaceContract) {
-    await ctx.reply("❌ Connect your wallet!");
+  if (!marketplaceContract) {
+    await ctx.reply("❌ Marketplace contract not configured.");
+    return;
+  }
+
+  const walletAddress = await getUserWalletAddress(userId);
+  if (!walletAddress) {
+    await ctx.reply("❌ Create or connect your wallet first!", {
+      reply_markup: new InlineKeyboard().text("👛 Wallet", "action_wallet")
+    });
     return;
   }
 
   try {
-    const offerIds = await marketplaceContract.getBuyerOffers(session.walletAddress);
+    const offerIds = await marketplaceContract.getBuyerOffers(walletAddress);
 
     if (offerIds.length === 0) {
       await ctx.reply("📭 You don't have any active offers!");
@@ -2221,14 +2315,21 @@ bot.callbackQuery("action_my_challenges", async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  const session = sessionStore.get(userId);
-  if (!session?.walletAddress || !battleContract) {
-    await ctx.reply("❌ Connect your wallet!");
+  if (!battleContract) {
+    await ctx.reply("❌ Battle arena not configured.");
+    return;
+  }
+
+  const walletAddress = await getUserWalletAddress(userId);
+  if (!walletAddress) {
+    await ctx.reply("❌ Create or connect your wallet first!", {
+      reply_markup: new InlineKeyboard().text("👛 Wallet", "action_wallet")
+    });
     return;
   }
 
   try {
-    const pending = await battleContract.getPlayerPendingChallenges(session.walletAddress);
+    const pending = await battleContract.getPlayerPendingChallenges(walletAddress);
 
     if (pending.length === 0) {
       await ctx.reply("📋 You don't have any pending challenges!");
@@ -2268,6 +2369,15 @@ bot.callbackQuery("main_menu", async (ctx) => {
 bot.callbackQuery("my_drafts", async (ctx) => {
   await ctx.answerCallbackQuery();
   await showMyDrafts(ctx);
+});
+
+// View card from My Cards list
+bot.callbackQuery(/^view_card_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const match = ctx.callbackQuery.data.match(/^view_card_(\d+)$/);
+  if (!match) return;
+  const cardId = parseInt(match[1]);
+  await showCardDetails(ctx, cardId);
 });
 
 // Pack purchase
@@ -2714,32 +2824,15 @@ bot.callbackQuery(/^buy_listing_\d+$/, async (ctx) => {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  // Check for custodial wallet first
-  let userWalletAddress: string | null = null;
-  let userBalance = "0";
-  try {
-    const walletManager = getWalletManager();
-    if (walletManager.hasWallet(userId)) {
-      const walletInfo = await walletManager.getWallet(userId);
-      if (walletInfo) {
-        userWalletAddress = walletInfo.address;
-        userBalance = walletInfo.balanceFormatted;
-      }
-    }
-  } catch (e) {
-    // Fall back to session wallet
-  }
-
-  // Fall back to session wallet address
-  const session = sessionStore.get(userId);
-  if (!userWalletAddress && !session?.walletAddress) {
-    await ctx.reply("❌ Crea prima un wallet!", {
-      reply_markup: new InlineKeyboard().text("👛 Crea Wallet", "wallet_create")
+  const walletInfo = await getUserWalletWithBalance(userId);
+  if (!walletInfo) {
+    await ctx.reply("❌ Create your wallet first!", {
+      reply_markup: new InlineKeyboard().text("👛 Create Wallet", "wallet_create")
     });
     return;
   }
 
-  const walletAddress = userWalletAddress || session?.walletAddress || "";
+  const { address: walletAddress, balanceFormatted: userBalance } = walletInfo;
 
   const match = ctx.callbackQuery.data.match(/^buy_listing_(\d+)$/);
   if (!match) return;

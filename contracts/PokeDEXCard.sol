@@ -63,6 +63,12 @@ contract PokeDEXCard is
     /// @notice Last sale price in wei (set by marketplace)
     mapping(uint256 => uint256) private _lastSalePrice;
 
+    /// @notice Mapping from owner to list of owned token IDs (for enumeration)
+    mapping(address => uint256[]) private _ownedTokens;
+
+    /// @notice Mapping from token ID to index in owner's token list
+    mapping(uint256 => uint256) private _ownedTokensIndex;
+
     /// @notice Maximum stats values
     uint16 public constant MAX_STAT = 255;
     uint32 public constant MAX_EXPERIENCE = 1000000;
@@ -234,6 +240,16 @@ contract PokeDEXCard is
     }
 
     /**
+     * @notice Get all token IDs owned by an address
+     * @dev Used by frontend/bot to display user's card collection
+     * @param owner Address to query
+     * @return Array of token IDs owned by the address
+     */
+    function tokensOfOwner(address owner) external view returns (uint256[] memory) {
+        return _ownedTokens[owner];
+    }
+
+    /**
      * @notice Pause all minting and stat update operations
      * @dev Only callable by accounts with DEFAULT_ADMIN_ROLE. Transfers still work when paused.
      */
@@ -402,7 +418,7 @@ contract PokeDEXCard is
     }
 
     /**
-     * @dev Override _update to track transfers for trade metrics
+     * @dev Override _update to track transfers for trade metrics and ownership enumeration
      * @param to Address receiving the token
      * @param tokenId Token being transferred
      * @param auth Address authorized for the transfer
@@ -414,6 +430,14 @@ contract PokeDEXCard is
         address auth
     ) internal override returns (address) {
         address from = _ownerOf(tokenId);
+
+        // Update ownership enumeration
+        if (from != address(0)) {
+            _removeTokenFromOwnerEnumeration(from, tokenId);
+        }
+        if (to != address(0)) {
+            _addTokenToOwnerEnumeration(to, tokenId);
+        }
 
         // Track transfers (not mints or burns)
         if (from != address(0) && to != address(0) && from != to) {
@@ -450,6 +474,37 @@ contract PokeDEXCard is
      */
     function _min(uint256 a, uint256 b) internal pure returns (uint256) {
         return a < b ? a : b;
+    }
+
+    /**
+     * @dev Add token to owner's enumeration list
+     * @param to Address receiving the token
+     * @param tokenId Token being added
+     */
+    function _addTokenToOwnerEnumeration(address to, uint256 tokenId) private {
+        _ownedTokensIndex[tokenId] = _ownedTokens[to].length;
+        _ownedTokens[to].push(tokenId);
+    }
+
+    /**
+     * @dev Remove token from owner's enumeration list using swap-and-pop
+     * @param from Address losing the token
+     * @param tokenId Token being removed
+     */
+    function _removeTokenFromOwnerEnumeration(address from, uint256 tokenId) private {
+        uint256 lastTokenIndex = _ownedTokens[from].length - 1;
+        uint256 tokenIndex = _ownedTokensIndex[tokenId];
+
+        // If not last token, swap with last
+        if (tokenIndex != lastTokenIndex) {
+            uint256 lastTokenId = _ownedTokens[from][lastTokenIndex];
+            _ownedTokens[from][tokenIndex] = lastTokenId;
+            _ownedTokensIndex[lastTokenId] = tokenIndex;
+        }
+
+        // Remove last element
+        _ownedTokens[from].pop();
+        delete _ownedTokensIndex[tokenId];
     }
 
     /**
