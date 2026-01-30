@@ -1,0 +1,254 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+import "./interfaces/IPokeDEXCard.sol";
+
+/**
+ * @title PokeDEXCard
+ * @dev ERC-721 NFT contract for Pokemon trading cards
+ * @notice Main NFT contract with card stats and metadata
+ */
+contract PokeDEXCard is
+    ERC721URIStorage,
+    AccessControl,
+    ReentrancyGuard,
+    Pausable,
+    IPokeDEXCard
+{
+    /// @notice Role for minting new cards
+    bytes32 public constant MINTER_ROLE = keccak256("MINTER_ROLE");
+
+    /// @notice Role for updating card stats (battle arena)
+    bytes32 public constant STATS_UPDATER_ROLE = keccak256("STATS_UPDATER_ROLE");
+
+    /// @notice Counter for token IDs
+    uint256 private _tokenIdCounter;
+
+    /// @notice Mapping from token ID to card stats
+    mapping(uint256 => CardStats) private _cardStats;
+
+    /// @notice Maximum stats values
+    uint16 public constant MAX_STAT = 255;
+    uint32 public constant MAX_EXPERIENCE = 1000000;
+
+    /**
+     * @notice Contract constructor
+     * @param admin Address to receive admin role
+     */
+    constructor(address admin) ERC721("PokeDEX Card", "PDEX") {
+        require(admin != address(0), "Invalid admin address");
+
+        _grantRole(DEFAULT_ADMIN_ROLE, admin);
+        _grantRole(MINTER_ROLE, admin);
+        _grantRole(STATS_UPDATER_ROLE, admin);
+    }
+
+    /**
+     * @notice Mint a new Pokemon card
+     * @param to Recipient address
+     * @param uri Token metadata URI
+     * @param stats Card statistics
+     * @return tokenId The minted token ID
+     */
+    function mintCard(
+        address to,
+        string calldata uri,
+        CardStats calldata stats
+    )
+        external
+        override
+        onlyRole(MINTER_ROLE)
+        nonReentrant
+        whenNotPaused
+        returns (uint256)
+    {
+        require(to != address(0), "Cannot mint to zero address");
+        require(bytes(uri).length > 0, "URI cannot be empty");
+        _validateStats(stats);
+
+        uint256 tokenId = ++_tokenIdCounter;
+
+        _safeMint(to, tokenId);
+        _setTokenURI(tokenId, uri);
+        _cardStats[tokenId] = stats;
+
+        emit CardMinted(tokenId, to, stats.pokemonType, stats.rarity);
+
+        return tokenId;
+    }
+
+    /**
+     * @notice Batch mint multiple cards
+     * @param to Recipient address
+     * @param uris Array of token URIs
+     * @param statsArray Array of card stats
+     * @return tokenIds Array of minted token IDs
+     */
+    function batchMintCards(
+        address to,
+        string[] calldata uris,
+        CardStats[] calldata statsArray
+    )
+        external
+        onlyRole(MINTER_ROLE)
+        nonReentrant
+        whenNotPaused
+        returns (uint256[] memory)
+    {
+        require(to != address(0), "Cannot mint to zero address");
+        require(uris.length == statsArray.length, "Arrays length mismatch");
+        require(uris.length > 0 && uris.length <= 20, "Invalid batch size");
+
+        uint256[] memory tokenIds = new uint256[](uris.length);
+
+        for (uint256 i = 0; i < uris.length; i++) {
+            require(bytes(uris[i]).length > 0, "URI cannot be empty");
+            _validateStats(statsArray[i]);
+
+            uint256 tokenId = ++_tokenIdCounter;
+
+            _safeMint(to, tokenId);
+            _setTokenURI(tokenId, uris[i]);
+            _cardStats[tokenId] = statsArray[i];
+
+            tokenIds[i] = tokenId;
+
+            emit CardMinted(tokenId, to, statsArray[i].pokemonType, statsArray[i].rarity);
+        }
+
+        return tokenIds;
+    }
+
+    /**
+     * @notice Get card stats for a token
+     * @param tokenId Token ID to query
+     * @return CardStats struct with all card data
+     */
+    function getCardStats(uint256 tokenId)
+        external
+        view
+        override
+        returns (CardStats memory)
+    {
+        _requireOwned(tokenId);
+        return _cardStats[tokenId];
+    }
+
+    /**
+     * @notice Add experience to a card
+     * @param tokenId Token ID to update
+     * @param expAmount Experience points to add
+     */
+    function addExperience(uint256 tokenId, uint32 expAmount)
+        external
+        override
+        onlyRole(STATS_UPDATER_ROLE)
+        nonReentrant
+        whenNotPaused
+    {
+        _requireOwned(tokenId);
+
+        CardStats storage card = _cardStats[tokenId];
+        // Use uint256 to prevent overflow before capping
+        uint256 newExp = uint256(card.experience) + uint256(expAmount);
+
+        // Cap at max experience (safe cast after comparison)
+        card.experience = newExp > MAX_EXPERIENCE ? MAX_EXPERIENCE : uint32(newExp);
+
+        emit CardStatsUpdated(tokenId, card.experience);
+    }
+
+    /**
+     * @notice Calculate battle power of a card
+     * @param tokenId Token ID to calculate
+     * @return Battle power value
+     */
+    function calculateBattlePower(uint256 tokenId) external view returns (uint256) {
+        _requireOwned(tokenId);
+        CardStats memory stats = _cardStats[tokenId];
+
+        // Battle power formula: weighted sum of stats with rarity multiplier
+        uint256 basePower = (uint256(stats.hp) * 2) +
+                           (uint256(stats.attack) * 3) +
+                           (uint256(stats.defense) * 2) +
+                           (uint256(stats.speed) * 3);
+
+        // Rarity multipliers: Common=100, Uncommon=120, Rare=150, UltraRare=200, Legendary=300
+        uint256 rarityMultiplier = _getRarityMultiplier(stats.rarity);
+
+        // Experience bonus (up to 50% at max exp) - improved precision
+        // Formula: basePower * rarityMultiplier * (100 + expBonus) / 10000
+        // Where expBonus = (experience * 50) / MAX_EXPERIENCE
+        // Refactored to: basePower * rarityMultiplier * (100 * MAX_EXPERIENCE + experience * 50) / (10000 * MAX_EXPERIENCE)
+        uint256 maxExp = uint256(MAX_EXPERIENCE);
+        uint256 expScaled = uint256(stats.experience) * 50;
+        uint256 baseScaled = 100 * maxExp;
+
+        return (basePower * rarityMultiplier * (baseScaled + expScaled)) / (10000 * maxExp);
+    }
+
+    /**
+     * @notice Get total number of cards minted
+     * @return Total supply
+     */
+    function totalSupply() external view returns (uint256) {
+        return _tokenIdCounter;
+    }
+
+    /**
+     * @notice Pause contract operations
+     */
+    function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _pause();
+    }
+
+    /**
+     * @notice Unpause contract operations
+     */
+    function unpause() external onlyRole(DEFAULT_ADMIN_ROLE) {
+        _unpause();
+    }
+
+    /**
+     * @notice Check if contract supports an interface
+     * @param interfaceId Interface identifier
+     * @return True if supported
+     */
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        override(ERC721URIStorage, AccessControl)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
+    }
+
+    /**
+     * @dev Validate card stats are within bounds
+     * @param stats Stats to validate
+     */
+    function _validateStats(CardStats calldata stats) internal pure {
+        require(stats.hp > 0 && stats.hp <= MAX_STAT, "Invalid HP");
+        require(stats.attack <= MAX_STAT, "Invalid attack");
+        require(stats.defense <= MAX_STAT, "Invalid defense");
+        require(stats.speed <= MAX_STAT, "Invalid speed");
+        require(stats.generation > 0 && stats.generation <= 9, "Invalid generation");
+    }
+
+    /**
+     * @dev Get rarity multiplier for battle power calculation
+     * @param rarity Card rarity
+     * @return Multiplier value (100-300)
+     */
+    function _getRarityMultiplier(Rarity rarity) internal pure returns (uint256) {
+        if (rarity == Rarity.Common) return 100;
+        if (rarity == Rarity.Uncommon) return 120;
+        if (rarity == Rarity.Rare) return 150;
+        if (rarity == Rarity.UltraRare) return 200;
+        return 300; // Legendary
+    }
+}
