@@ -412,7 +412,9 @@ contract PokeDEXCard is
         uint256 veteranBonus = holderDays > 30 ? (powerWithExp * 10) / 100 : 0;
 
         // Price weight: +1 power per 0.01 ETH of last sale price
-        uint256 priceBonus = _lastSalePrice[tokenId] / 0.01 ether;
+        // Capped at 100 (equivalent to 1 ETH) to prevent wash trading exploitation
+        uint256 rawPriceBonus = _lastSalePrice[tokenId] / 0.01 ether;
+        uint256 priceBonus = rawPriceBonus > 100 ? 100 : rawPriceBonus;
 
         return powerWithExp + tradeBonus + veteranBonus + priceBonus;
     }

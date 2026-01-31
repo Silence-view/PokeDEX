@@ -38,8 +38,10 @@ contract BattleArena is
     /// @notice Minimum bet amount (0.001 ETH)
     uint256 public constant MIN_BET = 0.001 ether;
 
-    /// @notice Maximum bet amount (10 ETH)
-    uint256 public constant MAX_BET = 10 ether;
+    /// @notice Maximum bet amount (0.5 ETH)
+    /// @dev Reduced from 10 ETH due to tiebreaker determinism. For higher stakes,
+    /// integrate VRF/QRNG (see CardPack.sol for API3 QRNG example).
+    uint256 public constant MAX_BET = 0.5 ether;
 
     // =============================================================================
     // EVENTS
@@ -906,9 +908,9 @@ contract BattleArena is
         // Update player stats
         _updatePlayerStats(winner, loser);
 
-        // Award experience
-        cardContract.addExperience(winnerCardId, winnerExpReward);
-        cardContract.addExperience(loserCardId, loserExpReward);
+        // Award experience (non-critical - use try-catch to not block battle completion)
+        try cardContract.addExperience(winnerCardId, winnerExpReward) {} catch {}
+        try cardContract.addExperience(loserCardId, loserExpReward) {} catch {}
 
         // Clean up pending/active arrays
         _removeFromArray(activeChallenges[battle.challenger], battleId);
@@ -952,17 +954,23 @@ contract BattleArena is
         uint256 originalChallengerPower = challengerPower;
         uint256 originalOpponentPower = opponentPower;
 
-        // Add speed tiebreaker + randomness factor
+        // Deterministic tiebreaker: speed first, then card age (lower ID = older = wins)
+        // Note: This is intentionally deterministic to prevent miner manipulation.
+        // For randomized outcomes with high stakes, integrate VRF/QRNG.
         if (challengerPower == opponentPower) {
-            // Use block data for additional randomness in tiebreaker
-            uint256 randomFactor = uint256(keccak256(abi.encodePacked(
-                block.timestamp,
-                block.prevrandao,
-                battleId
-            ))) % 100;
-
-            challengerPower += challengerStats.speed + (randomFactor / 2);
-            opponentPower += opponentStats.speed + (randomFactor % 50);
+            // First tiebreaker: speed stat
+            if (challengerStats.speed != opponentStats.speed) {
+                challengerPower += challengerStats.speed;
+                opponentPower += opponentStats.speed;
+            } else {
+                // Second tiebreaker: older card (lower ID) wins
+                // This rewards early adopters and is fully predictable
+                if (challengerCardId < opponentCardId) {
+                    challengerPower += 1;
+                } else {
+                    opponentPower += 1;
+                }
+            }
         }
 
         // Determine winner
@@ -1015,12 +1023,23 @@ contract BattleArena is
         emit WinningsDistributed(battleId, winner, payout);
 
         // INTERACTIONS: External calls LAST
-        cardContract.addExperience(winnerCardId, winnerExpReward);
-        cardContract.addExperience(loserCardId, loserExpReward);
-
-        // Pay winner
+        // Pay winner first (critical - must succeed)
         (bool success, ) = payable(winner).call{value: payout}("");
         require(success, "Payout failed");
+
+        // Experience rewards (non-critical - use try-catch to not block payouts)
+        // Experience can fail if card is burned or at max level, but payout is already done
+        try cardContract.addExperience(winnerCardId, winnerExpReward) {
+            // Success - experience added
+        } catch {
+            // Silently fail - payout already done, experience is bonus
+        }
+
+        try cardContract.addExperience(loserCardId, loserExpReward) {
+            // Success - experience added
+        } catch {
+            // Silently fail - card might be burned or at max level
+        }
     }
 
     // =============================================================================

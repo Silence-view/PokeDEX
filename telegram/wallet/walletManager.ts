@@ -58,11 +58,33 @@ export class RateLimiter {
   private readonly maxAttempts: number;
   private readonly windowMs: number;
   private readonly cooldownMs: number;
+  private cleanupInterval?: NodeJS.Timeout;
 
   constructor(maxAttempts = 3, windowMs = 60000, cooldownMs = 300000) {
     this.maxAttempts = maxAttempts;
     this.windowMs = windowMs;
     this.cooldownMs = cooldownMs;
+    // Clean up stale entries every 10 minutes
+    this.cleanupInterval = setInterval(() => this.cleanup(), 600000);
+  }
+
+  private cleanup(): void {
+    const now = Date.now();
+    for (const [key, entry] of this.attempts) {
+      const expiryTime = Math.max(
+        entry.firstAttempt + this.windowMs,
+        entry.lastAttempt + this.cooldownMs
+      );
+      if (now > expiryTime) {
+        this.attempts.delete(key);
+      }
+    }
+  }
+
+  destroy(): void {
+    if (this.cleanupInterval) {
+      clearInterval(this.cleanupInterval);
+    }
   }
 
   isAllowed(key: string): { allowed: boolean; retryAfterMs?: number } {
@@ -109,6 +131,19 @@ export const withdrawRateLimiter = new RateLimiter(5, 60000, 600000); // 5 attem
 // =============================================================================
 // WALLET MANAGER - Multi-wallet support
 // =============================================================================
+
+// Atomic file write helper - prevents data corruption on crash
+function atomicWriteFileSync(filePath: string, data: string, mode: number = 0o600): void {
+  const tempPath = `${filePath}.tmp.${Date.now()}`;
+  try {
+    fs.writeFileSync(tempPath, data, { mode });
+    fs.renameSync(tempPath, filePath);
+  } catch (error) {
+    // Clean up temp file if rename failed
+    try { fs.unlinkSync(tempPath); } catch { /* ignore */ }
+    throw error;
+  }
+}
 
 export class WalletManager {
   private readonly walletsDir: string;
@@ -168,7 +203,7 @@ export class WalletManager {
   }
 
   private saveIndex(userId: number, index: UserWalletsIndex): void {
-    fs.writeFileSync(this.getIndexPath(userId), JSON.stringify(index, null, 2), { mode: 0o600 });
+    atomicWriteFileSync(this.getIndexPath(userId), JSON.stringify(index, null, 2), 0o600);
   }
 
   // Migration: check for old single-wallet format
@@ -185,7 +220,7 @@ export class WalletManager {
       };
 
       const userDir = this.getUserDir(userId);
-      fs.writeFileSync(path.join(userDir, `${walletId}.wallet.enc`), JSON.stringify(newWallet, null, 2), { mode: 0o600 });
+      atomicWriteFileSync(path.join(userDir, `${walletId}.wallet.enc`), JSON.stringify(newWallet, null, 2), 0o600);
 
       const index: UserWalletsIndex = {
         activeWalletId: walletId,
@@ -252,8 +287,8 @@ export class WalletManager {
       lastUsed: Date.now(),
     };
 
-    // Save encrypted wallet with restricted permissions
-    fs.writeFileSync(this.getWalletPath(userId, walletId), JSON.stringify(encryptedWallet, null, 2), { mode: 0o600 });
+    // Save encrypted wallet with restricted permissions (atomic write)
+    atomicWriteFileSync(this.getWalletPath(userId, walletId), JSON.stringify(encryptedWallet, null, 2), 0o600);
 
     // Update index
     index.wallets.push({
@@ -390,9 +425,9 @@ export class WalletManager {
     let decrypted = decipher.update(encryptedData, "hex", "utf8");
     decrypted += decipher.final("utf8");
 
-    // Update last used
+    // Update last used (atomic write)
     data.lastUsed = Date.now();
-    fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+    atomicWriteFileSync(filePath, JSON.stringify(data, null, 2), 0o600);
 
     return new ethers.Wallet(decrypted, this.provider);
   }
@@ -471,7 +506,7 @@ export class WalletManager {
     if (fs.existsSync(filePath)) {
       const data = JSON.parse(fs.readFileSync(filePath, "utf8")) as EncryptedWallet;
       data.name = newName;
-      fs.writeFileSync(filePath, JSON.stringify(data, null, 2), { mode: 0o600 });
+      atomicWriteFileSync(filePath, JSON.stringify(data, null, 2), 0o600);
     }
 
     return true;

@@ -94,7 +94,15 @@ const PACK_PRICES = { basic: "0.01", premium: "0.025", legendary: "0.05" };
 
 // Wallets directory for custodial wallets
 const WALLETS_DIR = path.resolve(__dirname, "../data/wallets");
-const WALLET_MASTER_KEY = process.env.WALLET_MASTER_KEY || "default-master-key-change-in-production";
+
+// CRITICAL SECURITY: Master key must be set via environment variable
+if (!process.env.WALLET_MASTER_KEY) {
+  console.error("❌ CRITICAL: WALLET_MASTER_KEY environment variable is not set!");
+  console.error("   This key encrypts all user wallet data. Generate a secure random key:");
+  console.error("   openssl rand -hex 32");
+  process.exit(1);
+}
+const WALLET_MASTER_KEY = process.env.WALLET_MASTER_KEY;
 
 // =============================================================================
 // WALLET ADDRESS HELPER
@@ -346,7 +354,9 @@ const CARD_ABI = [
 
 const PACK_ABI = [
   "function getPackPrice(uint8 packType) view returns (uint256)",
-  "function getUserPendingRequests(address user) view returns (uint256[])",
+  // Note: Returns bytes32[] but uint256[] works due to identical ABI encoding
+  // Using bytes32[] for correctness with the contract interface
+  "function getUserPendingRequests(address user) view returns (bytes32[])",
   "function purchasePack(uint8 packType) payable returns (uint256)"
 ];
 
@@ -376,7 +386,7 @@ const MARKETPLACE_ABI = [
   "function getSellerListings(address seller) view returns (uint256[])",
   "function getBuyerOffers(address buyer) view returns (uint256[])",
   "function listingCount() view returns (uint256)",
-  "function listNFT(address nftContract, uint256 tokenId, uint256 price) returns (uint256)",
+  "function listNFT(address nftContract, uint256 tokenId, uint256 price, string imageURI) returns (uint256)",
   "function buyNFT(uint256 listingId) payable",
   "function cancelListing(uint256 listingId)",
   "function makeOffer(address nftContract, uint256 tokenId, uint256 expiresIn) payable returns (uint256)",
@@ -440,6 +450,69 @@ if (process.env.PINATA_API_KEY && process.env.PINATA_SECRET_KEY) {
 // IPFS UPLOAD HELPERS
 // =============================================================================
 
+// Security: File validation constants
+const MAX_IMAGE_SIZE_BYTES = 5 * 1024 * 1024; // 5MB max
+const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"] as const;
+
+/**
+ * Detect image type from buffer magic bytes
+ * Returns null if not a recognized image format
+ */
+function detectImageType(buffer: Buffer): string | null {
+  if (buffer.length < 12) return null;
+
+  // Check JPEG
+  if (buffer[0] === 0xFF && buffer[1] === 0xD8 && buffer[2] === 0xFF) {
+    return "image/jpeg";
+  }
+
+  // Check PNG
+  if (buffer[0] === 0x89 && buffer[1] === 0x50 && buffer[2] === 0x4E && buffer[3] === 0x47 &&
+      buffer[4] === 0x0D && buffer[5] === 0x0A && buffer[6] === 0x1A && buffer[7] === 0x0A) {
+    return "image/png";
+  }
+
+  // Check GIF
+  if (buffer[0] === 0x47 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x38) {
+    return "image/gif";
+  }
+
+  // Check WebP (RIFF....WEBP)
+  if (buffer[0] === 0x52 && buffer[1] === 0x49 && buffer[2] === 0x46 && buffer[3] === 0x46 &&
+      buffer[8] === 0x57 && buffer[9] === 0x45 && buffer[10] === 0x42 && buffer[11] === 0x50) {
+    return "image/webp";
+  }
+
+  return null;
+}
+
+/**
+ * Validate image buffer for security
+ * Throws descriptive error if validation fails
+ */
+function validateImageBuffer(buffer: Buffer, context: string = "image"): void {
+  // Check size
+  if (buffer.length > MAX_IMAGE_SIZE_BYTES) {
+    const sizeMB = (buffer.length / (1024 * 1024)).toFixed(2);
+    const maxMB = (MAX_IMAGE_SIZE_BYTES / (1024 * 1024)).toFixed(0);
+    throw new Error(`${context} is too large (${sizeMB}MB). Maximum size is ${maxMB}MB.`);
+  }
+
+  if (buffer.length === 0) {
+    throw new Error(`${context} is empty.`);
+  }
+
+  // Check type via magic bytes
+  const detectedType = detectImageType(buffer);
+  if (!detectedType) {
+    throw new Error(`${context} is not a valid image format. Allowed: JPEG, PNG, GIF, WebP.`);
+  }
+
+  if (!ALLOWED_IMAGE_TYPES.includes(detectedType as typeof ALLOWED_IMAGE_TYPES[number])) {
+    throw new Error(`${context} type "${detectedType}" is not allowed. Allowed: JPEG, PNG, GIF, WebP.`);
+  }
+}
+
 async function downloadPhotoFromTelegram(bot: Bot<MyContext>, fileId: string): Promise<Buffer> {
   const file = await bot.api.getFile(fileId);
   const filePath = file.file_path;
@@ -456,11 +529,19 @@ async function downloadPhotoFromTelegram(bot: Bot<MyContext>, fileId: string): P
   }
 
   const arrayBuffer = await response.arrayBuffer();
-  return Buffer.from(arrayBuffer);
+  const buffer = Buffer.from(arrayBuffer);
+
+  // Security: Validate image before returning
+  validateImageBuffer(buffer, "Downloaded image");
+
+  return buffer;
 }
 
 async function uploadImageToPinata(imageBuffer: Buffer, fileName: string): Promise<string> {
   if (!pinata) throw new Error("Pinata not configured");
+
+  // Security: Defense-in-depth validation before upload
+  validateImageBuffer(imageBuffer, "Image for upload");
 
   const readableStream = Readable.from(imageBuffer);
 
@@ -476,6 +557,69 @@ async function uploadImageToPinata(imageBuffer: Buffer, fileName: string): Promi
   return result.IpfsHash;
 }
 
+// =============================================================================
+// INPUT SANITIZATION - Prevent XSS and injection attacks
+// =============================================================================
+
+const MAX_NAME_LENGTH = 50;
+const MAX_DESCRIPTION_LENGTH = 500;
+
+/**
+ * Sanitize text for safe use in NFT metadata (prevents HTML/script injection)
+ * Removes HTML tags, script content, and dangerous characters
+ */
+function sanitizeForMetadata(text: string, maxLength: number = 500): string {
+  if (!text || typeof text !== "string") return "";
+
+  return text
+    // Remove HTML tags
+    .replace(/<[^>]*>/g, "")
+    // Remove script content
+    .replace(/<script[^>]*>.*?<\/script>/gi, "")
+    // Remove event handlers
+    .replace(/on\w+\s*=\s*["'][^"']*["']/gi, "")
+    // Remove javascript: URLs
+    .replace(/javascript:/gi, "")
+    // Remove data: URLs (could contain scripts)
+    .replace(/data:/gi, "")
+    // Normalize whitespace
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, maxLength);
+}
+
+/**
+ * Sanitize text for safe display in Telegram Markdown
+ * Escapes characters that have special meaning in Markdown
+ */
+function sanitizeForMarkdown(text: string): string {
+  if (!text || typeof text !== "string") return "";
+
+  return text
+    // Escape markdown special characters
+    .replace(/[_*\[\]()~`>#+=|{}.!-]/g, "\\$&")
+    .trim();
+}
+
+/**
+ * Validate and sanitize card name
+ */
+function sanitizeCardName(name: string): string {
+  const sanitized = sanitizeForMetadata(name, MAX_NAME_LENGTH);
+  if (sanitized.length === 0) {
+    throw new Error("Card name cannot be empty after sanitization");
+  }
+  // Only allow alphanumeric, spaces, and common punctuation
+  return sanitized.replace(/[^a-zA-Z0-9\s\-'!?.]/g, "").trim();
+}
+
+/**
+ * Validate and sanitize card description
+ */
+function sanitizeCardDescription(description: string): string {
+  return sanitizeForMetadata(description, MAX_DESCRIPTION_LENGTH);
+}
+
 async function uploadMetadataToPinata(metadata: NFTMetadata, cardName: string): Promise<string> {
   if (!pinata) throw new Error("Pinata not configured");
 
@@ -489,9 +633,15 @@ async function uploadMetadataToPinata(metadata: NFTMetadata, cardName: string): 
 }
 
 function buildNFTMetadata(draft: CardDraft, imageIpfsHash: string): NFTMetadata {
+  // Sanitize all user-provided content before including in metadata
+  const sanitizedName = sanitizeCardName(draft.cardName);
+  const sanitizedDescription = sanitizeCardDescription(
+    draft.description || `Custom Pokemon card by ${sanitizeForMetadata(draft.creatorName, MAX_NAME_LENGTH)}`
+  );
+
   return {
-    name: draft.cardName,
-    description: draft.description || `Custom Pokemon card by ${draft.creatorName}`,
+    name: sanitizedName,
+    description: sanitizedDescription,
     image: `ipfs://${imageIpfsHash}`,
     external_url: "https://pokedex.app",
     attributes: [
@@ -1033,8 +1183,19 @@ async function cardCreationConversation(conversation: MyConversation, ctx: MyCon
     return;
   }
 
-  // Save image
+  // Get largest photo version
   const photo = imageCtx.message.photo[imageCtx.message.photo.length - 1];
+
+  // Security: Early file size check before downloading
+  if (photo.file_size && photo.file_size > MAX_IMAGE_SIZE_BYTES) {
+    const sizeMB = (photo.file_size / (1024 * 1024)).toFixed(2);
+    const maxMB = (MAX_IMAGE_SIZE_BYTES / (1024 * 1024)).toFixed(0);
+    await ctx.reply(`❌ Image is too large (${sizeMB}MB). Maximum size is ${maxMB}MB. Please compress the image and try again.`);
+    draftStore.delete(userId, draft.draftId);
+    return;
+  }
+
+  // Save image reference
   draft.imageTelegramFileId = photo.file_id;
   draft.imageSource = "telegram";
   draftStore.save(draft);
@@ -1050,8 +1211,21 @@ async function cardCreationConversation(conversation: MyConversation, ctx: MyCon
     return;
   }
 
-  draft.cardName = nameCtx.message.text.trim();
-  draft.creatorName = firstName || username || "Creator";
+  // Validate and sanitize card name
+  const rawName = nameCtx.message.text.trim();
+  if (rawName.length > MAX_NAME_LENGTH) {
+    await ctx.reply(`❌ Name too long (max ${MAX_NAME_LENGTH} characters). Please try again.`);
+    return;
+  }
+
+  try {
+    draft.cardName = sanitizeCardName(rawName);
+  } catch {
+    await ctx.reply("❌ Invalid name. Please use letters, numbers, and basic punctuation only.");
+    return;
+  }
+
+  draft.creatorName = sanitizeForMetadata(firstName || username || "Creator", MAX_NAME_LENGTH);
   draftStore.save(draft);
 
   // ========== STEP 3: Choose rarity (auto-generates stats) ==========
@@ -1064,7 +1238,8 @@ async function cardCreationConversation(conversation: MyConversation, ctx: MyCon
     .row()
     .text("🟡 Legendary", "rarity_4");
 
-  await ctx.reply(`✨ Choose rarity for *${draft.cardName}*
+  // Use sanitized name in Markdown (escape special chars)
+  await ctx.reply(`✨ Choose rarity for *${sanitizeForMarkdown(draft.cardName)}*
 
 Stats will be auto-generated based on rarity!
 Higher rarity = stronger stats.`, {
@@ -1127,12 +1302,25 @@ ${typeEmoji} Type: ${type} (random)
     draft.status = "uploading";
     draftStore.save(draft);
 
-    await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id,
-      "✅ *Step 1/3:* Image uploaded!\n✅ *Step 2/3:* Metadata created!\n🚀 *Step 3/3:* Deploying on-chain...", { parse_mode: "Markdown" });
-
     // Deploy on-chain
     draft.status = "minting";
     draftStore.save(draft);
+
+    // Show pending status with refresh button
+    const pendingKeyboard = new InlineKeyboard()
+      .text("🔄 Refresh Status", `refresh_mint_${draft.draftId}`)
+      .row()
+      .text("❌ Cancel", "main_menu");
+
+    await ctx.api.editMessageText(ctx.chat!.id, statusMsg.message_id,
+      `✅ *Step 1/3:* Image uploaded!
+✅ *Step 2/3:* Metadata created!
+🚀 *Step 3/3:* Deploying on-chain...
+
+⏳ *Waiting for blockchain confirmation...*
+
+_Click "Refresh Status" to check progress_`,
+      { parse_mode: "Markdown", reply_markup: pendingKeyboard });
 
     const deployResult = await deployCardOnChain(draft);
 
@@ -1156,7 +1344,7 @@ ${typeEmoji} Type: ${type} (random)
         .text("🎴 My Cards", "action_my_cards")
         .text("🏠 Menu", "main_menu");
 
-      await ctx.reply(`🎉 *${draft.cardName}* is now an NFT!
+      await ctx.reply(`🎉 *${sanitizeForMarkdown(draft.cardName)}* is now an NFT!
 
 ${rarityInfo.emoji} *Rarity:* ${rarityInfo.name}
 ${typeEmoji} *Type:* ${type}
@@ -1316,34 +1504,51 @@ Proceed with listing?`,
   await confirmCtx.editMessageText("🔄 *Processing listing...*\n\nStep 1/2: Approving marketplace...", { parse_mode: "Markdown" });
 
   try {
+    // Get user's signer (custodial wallet)
+    let userSigner: ethers.Wallet | null = null;
+    const walletManager = getWalletManager();
+    if (walletManager.hasWallet(userId)) {
+      userSigner = await walletManager.getSigner(userId);
+    }
+    const activeSigner = userSigner || signer;
+    if (!activeSigner) {
+      await ctx.reply("❌ No wallet available for signing transactions.", { reply_markup: getMainMenuKeyboard() });
+      return;
+    }
+
     // First, approve marketplace if not already approved
     const nftContract = CONTRACTS.CUSTOM_CARDS;
 
     // Check if already approved
     const approvalABI = ["function isApprovedForAll(address owner, address operator) view returns (bool)"];
     const nftForCheck = new ethers.Contract(nftContract, approvalABI, provider);
-    const isApproved = await nftForCheck.isApprovedForAll(signer!.address, CONTRACTS.MARKETPLACE);
+    const isApproved = await nftForCheck.isApprovedForAll(activeSigner.address, CONTRACTS.MARKETPLACE);
 
     if (!isApproved) {
       const approveABI = ["function setApprovalForAll(address operator, bool approved)"];
-      const nftForApprove = new ethers.Contract(nftContract, approveABI, signer!);
+      const nftForApprove = new ethers.Contract(nftContract, approveABI, activeSigner);
 
       const approveTx = await nftForApprove.setApprovalForAll(CONTRACTS.MARKETPLACE, true);
       await approveTx.wait();
-      console.log("Marketplace approved");
+      console.log("Marketplace approved for user:", activeSigner.address);
     }
 
     await confirmCtx.editMessageText("🔄 *Processing listing...*\n\n✅ Step 1/2: Marketplace approved!\n🔄 Step 2/2: Creating listing...", { parse_mode: "Markdown" });
 
-    // Create listing
-    const listTx = await marketplaceWritable!.listNFT(nftContract, selectedDraft.mintedTokenId, priceWei);
+    // Create listing with user's signer
+    const marketplaceWithSigner = new ethers.Contract(CONTRACTS.MARKETPLACE, MARKETPLACE_ABI, activeSigner);
+
+    // Get image URL from draft metadata
+    const imageURI = selectedDraft.ipfsImageUrl || selectedDraft.metadataUri || "";
+
+    const listTx = await marketplaceWithSigner.listNFT(nftContract, selectedDraft.mintedTokenId, priceWei, imageURI);
     const receipt = await listTx.wait();
 
     // Parse listing ID from event
     let listingId: number | undefined;
     for (const log of receipt.logs) {
       try {
-        const parsed = marketplaceWritable!.interface.parseLog({
+        const parsed = marketplaceWithSigner.interface.parseLog({
           topics: log.topics as string[],
           data: log.data
         });
@@ -1566,16 +1771,16 @@ async function showMyCards(ctx: MyContext) {
     return;
   }
 
-  if (!cardContract) {
-    await ctx.reply("❌ Card contract not configured.");
-    return;
-  }
-
   try {
-    // Get user's token IDs
-    const tokenIds = await cardContract.tokensOfOwner(walletAddress);
+    // Fetch cards from BOTH contracts in parallel
+    const [packCardIds, customCardIds] = await Promise.all([
+      cardContract ? cardContract.tokensOfOwner(walletAddress).catch(() => []) : Promise.resolve([]),
+      customCardsContract ? customCardsContract.getCreatorCards(walletAddress).catch(() => []) : Promise.resolve([])
+    ]);
 
-    if (tokenIds.length === 0) {
+    const totalCards = packCardIds.length + customCardIds.length;
+
+    if (totalCards === 0) {
       await ctx.reply("📭 You don't have any cards yet!\n\nCreate your first card or buy packs.", {
         reply_markup: new InlineKeyboard()
           .text("🎨 Create Card", "action_create_card")
@@ -1584,29 +1789,55 @@ async function showMyCards(ctx: MyContext) {
       return;
     }
 
-    // Build card list with inline buttons
     let message = `🎴 <b>Your Collection</b>\n\n`;
-    message += `You have <b>${tokenIds.length}</b> card(s):\n\n`;
+    message += `You have <b>${totalCards}</b> card(s):\n\n`;
 
     const keyboard = new InlineKeyboard();
+    let cardsShown = 0;
+    const maxCards = 10;
 
-    // Show up to 10 cards
-    const cardsToShow = tokenIds.slice(0, 10);
-    for (const tokenId of cardsToShow) {
-      try {
-        const stats = await cardContract.getCardStats(tokenId);
-        const rarityNames = ["Common", "Uncommon", "Rare", "Ultra Rare", "Legendary"];
-        const rarity = rarityNames[stats.rarity] || "Unknown";
-        message += `• Card #${tokenId} - ${rarity}\n`;
-        keyboard.text(`#${tokenId}`, `view_card_${tokenId}`).row();
-      } catch {
-        message += `• Card #${tokenId}\n`;
-        keyboard.text(`#${tokenId}`, `view_card_${tokenId}`).row();
+    // Show custom cards first (user creations)
+    if (customCardIds.length > 0 && customCardsContract) {
+      message += `<b>🎨 Your Creations:</b>\n`;
+      for (const tokenId of customCardIds.slice(0, maxCards)) {
+        if (cardsShown >= maxCards) break;
+        try {
+          const stats = await customCardsContract.getCardStats(tokenId);
+          const verified = stats.verified ? "✅" : "⏳";
+          const rarityNames = ["Common", "Uncommon", "Rare", "Ultra Rare", "Legendary"];
+          const rarity = rarityNames[stats.rarity] || "Unknown";
+          message += `• Card #${tokenId} - ${rarity} ${verified}\n`;
+          keyboard.text(`🎨 #${tokenId}`, `view_custom_card_${tokenId}`).row();
+        } catch {
+          message += `• Card #${tokenId}\n`;
+          keyboard.text(`🎨 #${tokenId}`, `view_custom_card_${tokenId}`).row();
+        }
+        cardsShown++;
+      }
+      message += `\n`;
+    }
+
+    // Show pack cards
+    if (packCardIds.length > 0 && cardContract && cardsShown < maxCards) {
+      message += `<b>📦 From Packs:</b>\n`;
+      for (const tokenId of packCardIds.slice(0, maxCards - cardsShown)) {
+        if (cardsShown >= maxCards) break;
+        try {
+          const stats = await cardContract.getCardStats(tokenId);
+          const rarityNames = ["Common", "Uncommon", "Rare", "Ultra Rare", "Legendary"];
+          const rarity = rarityNames[stats.rarity] || "Unknown";
+          message += `• Card #${tokenId} - ${rarity}\n`;
+          keyboard.text(`📦 #${tokenId}`, `view_card_${tokenId}`).row();
+        } catch {
+          message += `• Card #${tokenId}\n`;
+          keyboard.text(`📦 #${tokenId}`, `view_card_${tokenId}`).row();
+        }
+        cardsShown++;
       }
     }
 
-    if (tokenIds.length > 10) {
-      message += `\n... and ${tokenIds.length - 10} more`;
+    if (totalCards > maxCards) {
+      message += `\n... and ${totalCards - maxCards} more`;
     }
 
     await ctx.reply(message, {
@@ -1638,11 +1869,103 @@ async function showCardDetails(ctx: MyContext, cardId: number) {
       ? new InlineKeyboard().text("🛒 Sell", `sell_card_${cardId}`)
       : undefined;
 
-    await ctx.reply(
-      `${formatCard(cardId, stats)}\n💪 *Battle Power:* ${power}\n👤 *Owner:* ${isOwner ? "You! ✓" : formatAddress(owner)}`,
-      { parse_mode: "Markdown", reply_markup: keyboard }
-    );
+    const caption = `${formatCard(cardId, stats)}\n💪 *Battle Power:* ${power}\n👤 *Owner:* ${isOwner ? "You! ✓" : formatAddress(owner)}`;
+
+    // Try to fetch and display image
+    let imageUrl: string | undefined;
+    try {
+      const tokenURI = await cardContract.tokenURI(cardId);
+      const metadata = await fetchNFTMetadata(tokenURI);
+      imageUrl = metadata?.image;
+    } catch {}
+
+    if (imageUrl) {
+      try {
+        await ctx.replyWithPhoto(imageUrl, {
+          caption,
+          parse_mode: "Markdown",
+          reply_markup: keyboard
+        });
+        return;
+      } catch {
+        // Image fetch failed, fallback to text
+      }
+    }
+
+    // Fallback: text only
+    await ctx.reply(caption + (imageUrl ? "" : "\n\n📷 _(No image available)_"), {
+      parse_mode: "Markdown",
+      reply_markup: keyboard
+    });
   } catch (error) {
+    await ctx.reply("❌ Card not found.");
+  }
+}
+
+async function showCustomCardDetails(ctx: MyContext, cardId: number) {
+  if (!customCardsContract) {
+    await ctx.reply("❌ CustomCards contract not configured.");
+    return;
+  }
+
+  try {
+    const stats = await customCardsContract.getCardStats(cardId);
+    const power = await customCardsContract.calculateBattlePower(cardId);
+    const isBanned = await customCardsContract.isBanned(cardId);
+
+    const rarityNames = ["Common", "Uncommon", "Rare", "Ultra Rare", "Legendary"];
+    const typeNames = ["Normal", "Fire", "Water", "Grass", "Electric", "Psychic", "Fighting", "Dark", "Dragon"];
+    const rarity = rarityNames[stats.rarity] || "Unknown";
+    const cardType = typeNames[stats.cardType] || "Unknown";
+
+    const userId = ctx.from?.id;
+    const walletAddress = userId ? await getUserWalletAddress(userId) : null;
+    const isCreator = walletAddress?.toLowerCase() === stats.creator.toLowerCase();
+
+    let caption = `🎨 *Custom Card #${cardId}*\n\n`;
+    caption += `❤️ HP: ${stats.hp}\n`;
+    caption += `⚔️ Attack: ${stats.attack}\n`;
+    caption += `🛡️ Defense: ${stats.defense}\n`;
+    caption += `💨 Speed: ${stats.speed}\n`;
+    caption += `🏷️ Type: ${cardType}\n`;
+    caption += `⭐ Rarity: ${rarity}\n`;
+    caption += `💪 Battle Power: ${power}\n`;
+    caption += `✅ Verified: ${stats.verified ? "Yes" : "No"}\n`;
+    caption += `🚫 Banned: ${isBanned ? "Yes" : "No"}\n`;
+    caption += `👤 Creator: ${isCreator ? "You! ✓" : formatAddress(stats.creator)}`;
+
+    const keyboard = isCreator && CONTRACTS.MARKETPLACE && !isBanned
+      ? new InlineKeyboard().text("🛒 Sell", `sell_custom_card_${cardId}`)
+      : undefined;
+
+    // Try to fetch and display image
+    let imageUrl: string | undefined;
+    try {
+      const tokenURI = await customCardsContract.tokenURI(cardId);
+      const metadata = await fetchNFTMetadata(tokenURI);
+      imageUrl = metadata?.image;
+    } catch {}
+
+    if (imageUrl) {
+      try {
+        await ctx.replyWithPhoto(imageUrl, {
+          caption,
+          parse_mode: "Markdown",
+          reply_markup: keyboard
+        });
+        return;
+      } catch {
+        // Image fetch failed, fallback to text
+      }
+    }
+
+    // Fallback: text only
+    await ctx.reply(caption + (imageUrl ? "" : "\n\n📷 _(No image available)_"), {
+      parse_mode: "Markdown",
+      reply_markup: keyboard
+    });
+  } catch (error) {
+    console.error("Error showing custom card:", error);
     await ctx.reply("❌ Card not found.");
   }
 }
@@ -1950,42 +2273,6 @@ async function showMyListings(ctx: MyContext) {
   }
 }
 
-async function showSellInstructions(ctx: MyContext) {
-  if (!CONTRACTS.MARKETPLACE) {
-    await ctx.reply("❌ Marketplace not deployed.");
-    return;
-  }
-
-  const nftContract = CONTRACTS.CUSTOM_CARDS || CONTRACTS.POKEDEX_CARD;
-
-  const keyboard = new InlineKeyboard()
-    .url("1️⃣ Approve NFT", `${NETWORK.explorer}/address/${nftContract}#writeContract`)
-    .row()
-    .url("2️⃣ Create Listing", `${NETWORK.explorer}/address/${CONTRACTS.MARKETPLACE}#writeContract`);
-
-  await ctx.reply(
-    `💰 *Sell a Card*
-
-*Steps:*
-
-*1. Approve the Marketplace*
-• Function: \`setApprovalForAll\`
-• Operator: \`${CONTRACTS.MARKETPLACE}\`
-• Approved: true
-
-*2. Create the Listing*
-• Function: \`listNFT\`
-• nftContract: \`${nftContract}\`
-• tokenId: card ID
-• price: price in wei
-
-*ETH → Wei Conversion:*
-• 0.01 ETH = 10000000000000000
-• 0.1 ETH = 100000000000000000
-• 1 ETH = 1000000000000000000`,
-    { parse_mode: "Markdown", reply_markup: keyboard }
-  );
-}
 
 async function showBattleMenu(ctx: MyContext) {
   const userId = ctx.from?.id;
@@ -2210,6 +2497,138 @@ bot.callbackQuery("action_create_card", async (ctx) => {
   await ctx.conversation.enter("cardCreationConversation");
 });
 
+// Refresh minting status handler
+bot.callbackQuery(/^refresh_mint_(.+)$/, async (ctx) => {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await ctx.answerCallbackQuery("Error: User not found");
+    return;
+  }
+
+  const match = ctx.callbackQuery.data.match(/^refresh_mint_(.+)$/);
+  if (!match) {
+    await ctx.answerCallbackQuery("Invalid request");
+    return;
+  }
+
+  const draftId = match[1];
+  const draft = draftStore.get(userId, draftId);
+
+  if (!draft) {
+    await ctx.answerCallbackQuery("Draft not found");
+    return;
+  }
+
+  // Check current status
+  if (draft.status === "minted") {
+    await ctx.answerCallbackQuery("✅ Card already minted!");
+
+    const type = POKEMON_TYPES[draft.stats.pokemonType];
+    const typeEmoji = TYPE_EMOJIS[type] || "❓";
+    const rarityInfo = RARITIES[draft.stats.rarity];
+
+    const successKeyboard = new InlineKeyboard()
+      .url("🔍 View on Etherscan", `${NETWORK.explorer}/tx/${draft.mintTxHash}`)
+      .row()
+      .text("🎴 My Cards", "action_my_cards")
+      .text("🏠 Menu", "main_menu");
+
+    await ctx.editMessageText(`🎉 *${sanitizeForMarkdown(draft.cardName)}* is now an NFT!
+
+${rarityInfo.emoji} *Rarity:* ${rarityInfo.name}
+${typeEmoji} *Type:* ${type}
+❤️ HP: ${draft.stats.hp} | ⚔️ ATK: ${draft.stats.attack}
+🛡️ DEF: ${draft.stats.defense} | 💨 SPD: ${draft.stats.speed}
+
+🆔 *Token ID:* #${draft.mintedTokenId || "pending"}
+📜 *TX:* \`${draft.mintTxHash?.slice(0, 20)}...\`
+
+🛒 Ready to sell? Use the Marketplace!`, {
+      parse_mode: "Markdown",
+      reply_markup: successKeyboard
+    });
+    return;
+  }
+
+  if (draft.status === "failed") {
+    await ctx.answerCallbackQuery("❌ Minting failed");
+    await ctx.editMessageText(`❌ *Minting Failed*\n\n${draft.errorMessage || "Unknown error"}\n\nTry again with /drafts`, {
+      parse_mode: "Markdown",
+      reply_markup: getMainMenuKeyboard()
+    });
+    return;
+  }
+
+  if (draft.status === "minting" && draft.mintTxHash) {
+    // Check transaction on blockchain
+    try {
+      const receipt = await provider.getTransactionReceipt(draft.mintTxHash);
+      if (receipt) {
+        if (receipt.status === 1) {
+          // Success! Parse token ID
+          let tokenId: number | undefined;
+          for (const log of receipt.logs) {
+            try {
+              const parsed = customCardsContract?.interface.parseLog({
+                topics: log.topics as string[],
+                data: log.data
+              });
+              if (parsed?.name === "Transfer" && parsed.args[0] === ethers.ZeroAddress) {
+                tokenId = Number(parsed.args[2]);
+                break;
+              }
+            } catch {}
+          }
+
+          draft.status = "minted";
+          draft.mintedTokenId = tokenId;
+          draft.mintedAt = Date.now();
+          draftStore.save(draft);
+
+          await ctx.answerCallbackQuery("✅ Card minted!");
+
+          const type = POKEMON_TYPES[draft.stats.pokemonType];
+          const typeEmoji = TYPE_EMOJIS[type] || "❓";
+          const rarityInfo = RARITIES[draft.stats.rarity];
+
+          const successKeyboard = new InlineKeyboard()
+            .url("🔍 View on Etherscan", `${NETWORK.explorer}/tx/${draft.mintTxHash}`)
+            .row()
+            .text("🎴 My Cards", "action_my_cards")
+            .text("🏠 Menu", "main_menu");
+
+          await ctx.editMessageText(`🎉 *${sanitizeForMarkdown(draft.cardName)}* is now an NFT!
+
+${rarityInfo.emoji} *Rarity:* ${rarityInfo.name}
+${typeEmoji} *Type:* ${type}
+❤️ HP: ${draft.stats.hp} | ⚔️ ATK: ${draft.stats.attack}
+🛡️ DEF: ${draft.stats.defense} | 💨 SPD: ${draft.stats.speed}
+
+🆔 *Token ID:* #${tokenId || "pending"}
+📜 *TX:* \`${draft.mintTxHash?.slice(0, 20)}...\`
+
+🛒 Ready to sell? Use the Marketplace!`, {
+            parse_mode: "Markdown",
+            reply_markup: successKeyboard
+          });
+        } else {
+          draft.status = "failed";
+          draft.errorMessage = "Transaction reverted";
+          draftStore.save(draft);
+          await ctx.answerCallbackQuery("❌ Transaction failed");
+        }
+      } else {
+        await ctx.answerCallbackQuery("⏳ Still pending... try again in a moment");
+      }
+    } catch (error) {
+      await ctx.answerCallbackQuery("⏳ Still confirming...");
+    }
+    return;
+  }
+
+  await ctx.answerCallbackQuery(`Status: ${draft.status}`);
+});
+
 bot.callbackQuery("action_marketplace", async (ctx) => {
   await ctx.answerCallbackQuery();
   await showMarketplace(ctx);
@@ -2299,8 +2718,9 @@ bot.callbackQuery("action_my_offers", async (ctx) => {
     }
 
     await ctx.reply(message, { parse_mode: "Markdown" });
-  } catch {
-    await ctx.reply("❌ Error.");
+  } catch (error) {
+    console.error("Error showing offers:", error);
+    await ctx.reply("❌ Error loading offers. Please try again.");
   }
 });
 
@@ -2351,8 +2771,9 @@ bot.callbackQuery("action_my_challenges", async (ctx) => {
       reply_markup: new InlineKeyboard()
         .url("Accept Challenge", `${NETWORK.explorer}/address/${CONTRACTS.BATTLE_ARENA}#writeContract`)
     });
-  } catch {
-    await ctx.reply("❌ Error.");
+  } catch (error) {
+    console.error("Error showing pending challenges:", error);
+    await ctx.reply("❌ Error loading challenges. Please try again.");
   }
 });
 
@@ -2378,6 +2799,15 @@ bot.callbackQuery(/^view_card_(\d+)$/, async (ctx) => {
   if (!match) return;
   const cardId = parseInt(match[1]);
   await showCardDetails(ctx, cardId);
+});
+
+// View custom card from My Cards list
+bot.callbackQuery(/^view_custom_card_(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const match = ctx.callbackQuery.data.match(/^view_custom_card_(\d+)$/);
+  if (!match) return;
+  const cardId = parseInt(match[1]);
+  await showCustomCardDetails(ctx, cardId);
 });
 
 // Pack purchase
@@ -2942,7 +3372,7 @@ bot.callbackQuery("cancel_buy", async (ctx) => {
   });
 });
 
-// Sell specific card
+// Sell specific card (from PokeDEXCard contract)
 bot.callbackQuery(/^sell_card_\d+$/, async (ctx) => {
   await ctx.answerCallbackQuery();
 
@@ -2950,7 +3380,12 @@ bot.callbackQuery(/^sell_card_\d+$/, async (ctx) => {
   if (!match) return;
 
   const tokenId = match[1];
-  const nftContract = CONTRACTS.CUSTOM_CARDS || CONTRACTS.POKEDEX_CARD;
+  const nftContract = CONTRACTS.POKEDEX_CARD;
+
+  if (!nftContract) {
+    await ctx.reply("❌ Card contract not configured.");
+    return;
+  }
 
   const keyboard = new InlineKeyboard()
     .url("1️⃣ Approve", `${NETWORK.explorer}/address/${nftContract}#writeContract`)
@@ -2959,6 +3394,40 @@ bot.callbackQuery(/^sell_card_\d+$/, async (ctx) => {
 
   await ctx.reply(
     `💰 *Sell Card #${tokenId}*
+
+*Step 1:* \`setApprovalForAll\`
+Operator: \`${CONTRACTS.MARKETPLACE}\`
+
+*Step 2:* \`listNFT\`
+nftContract: \`${nftContract}\`
+tokenId: ${tokenId}
+price: (in wei)`,
+    { parse_mode: "Markdown", reply_markup: keyboard }
+  );
+});
+
+// Sell custom card (from PokeDEXCustomCards contract)
+bot.callbackQuery(/^sell_custom_card_\d+$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+
+  const match = ctx.callbackQuery.data.match(/^sell_custom_card_(\d+)$/);
+  if (!match) return;
+
+  const tokenId = match[1];
+  const nftContract = CONTRACTS.CUSTOM_CARDS;
+
+  if (!nftContract) {
+    await ctx.reply("❌ CustomCards contract not configured.");
+    return;
+  }
+
+  const keyboard = new InlineKeyboard()
+    .url("1️⃣ Approve", `${NETWORK.explorer}/address/${nftContract}#writeContract`)
+    .row()
+    .url("2️⃣ List", `${NETWORK.explorer}/address/${CONTRACTS.MARKETPLACE}#writeContract`);
+
+  await ctx.reply(
+    `💰 *Sell Custom Card #${tokenId}*
 
 *Step 1:* \`setApprovalForAll\`
 Operator: \`${CONTRACTS.MARKETPLACE}\`
