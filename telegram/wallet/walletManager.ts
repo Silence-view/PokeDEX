@@ -127,6 +127,7 @@ export class RateLimiter {
 // Global rate limiters for sensitive operations
 export const exportKeyRateLimiter = new RateLimiter(3, 60000, 300000); // 3 attempts per minute, 5 min cooldown
 export const withdrawRateLimiter = new RateLimiter(5, 60000, 600000); // 5 attempts per minute, 10 min cooldown
+export const marketplaceRateLimiter = new RateLimiter(10, 60000, 180000); // 10 ops per minute, 3 min cooldown
 
 // =============================================================================
 // WALLET MANAGER - Multi-wallet support

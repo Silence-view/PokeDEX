@@ -18,6 +18,7 @@ import {
   SENSITIVITY_LEVELS,
   exportKeyRateLimiter,
   withdrawRateLimiter,
+  marketplaceRateLimiter,
 } from "./wallet/index.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -381,19 +382,19 @@ const CUSTOM_CARDS_ABI = [
 
 const MARKETPLACE_ABI = [
   "function marketplaceFee() view returns (uint256)",
-  "function getListing(uint256 listingId) view returns (tuple(address seller, address nftContract, uint256 tokenId, uint256 price, bool active, uint256 createdAt))",
+  "function getListing(uint256 listingId) view returns (tuple(address seller, address nftContract, uint256 tokenId, uint256 price, bool active, uint256 createdAt, string imageURI))",
   "function getOffer(uint256 offerId) view returns (tuple(address buyer, address nftContract, uint256 tokenId, uint256 amount, uint256 expiresAt, bool active))",
   "function getSellerListings(address seller) view returns (uint256[])",
   "function getBuyerOffers(address buyer) view returns (uint256[])",
-  "function listingCount() view returns (uint256)",
+  "function totalListings() view returns (uint256)",
   "function listNFT(address nftContract, uint256 tokenId, uint256 price, string imageURI) returns (uint256)",
   "function buyNFT(uint256 listingId) payable",
   "function cancelListing(uint256 listingId)",
   "function makeOffer(address nftContract, uint256 tokenId, uint256 expiresIn) payable returns (uint256)",
   "function acceptOffer(uint256 offerId)",
   "function cancelOffer(uint256 offerId)",
-  "event Listed(uint256 indexed listingId, address indexed seller, address nftContract, uint256 tokenId, uint256 price)",
-  "event Sold(uint256 indexed listingId, address indexed buyer, uint256 price)"
+  "event NFTListed(uint256 indexed listingId, address indexed seller, address indexed nftContract, uint256 tokenId, uint256 price)",
+  "event NFTSold(uint256 indexed listingId, address indexed buyer, address indexed seller, uint256 price)"
 ];
 
 // =============================================================================
@@ -843,25 +844,28 @@ async function buyNFTOnChain(listingId: number, price: bigint, userId?: number):
     return { success: false, error: "Marketplace not configured" };
   }
 
-  try {
-    let userSigner: ethers.Wallet | null = null;
+  // SECURITY: User wallet is REQUIRED for marketplace purchases
+  // Bot wallet should NEVER be used for user transactions
+  if (!userId) {
+    return { success: false, error: "User ID required for purchase" };
+  }
 
-    // Try to use user's custodial wallet first
-    if (userId) {
-      try {
-        const walletManager = getWalletManager();
-        if (walletManager.hasWallet(userId)) {
-          userSigner = await walletManager.getSigner(userId);
-        }
-      } catch (e) {
-        console.log("User wallet not available, falling back to bot wallet");
-      }
+  // SECURITY: Rate limiting for marketplace operations
+  const rateLimitResult = marketplaceRateLimiter.isAllowed(userId.toString());
+  if (!rateLimitResult.allowed) {
+    const waitTime = Math.ceil((rateLimitResult.retryAfterMs || 60000) / 1000);
+    return { success: false, error: `Too many marketplace operations. Please wait ${waitTime} seconds.` };
+  }
+
+  try {
+    const walletManager = getWalletManager();
+    if (!walletManager.hasWallet(userId)) {
+      return { success: false, error: "Please create a wallet first to make purchases" };
     }
 
-    // Fall back to bot wallet if user wallet not available
-    const activeSigner = userSigner || signer;
+    const activeSigner = await walletManager.getSigner(userId);
     if (!activeSigner) {
-      return { success: false, error: "No wallet available" };
+      return { success: false, error: "Failed to access your wallet" };
     }
 
     // Check wallet balance
@@ -1396,6 +1400,16 @@ async function listCardConversation(conversation: MyConversation, ctx: MyContext
     return;
   }
 
+  // SECURITY: Rate limiting for marketplace operations
+  const rateLimitResult = marketplaceRateLimiter.isAllowed(userId.toString());
+  if (!rateLimitResult.allowed) {
+    const waitTime = Math.ceil((rateLimitResult.retryAfterMs || 60000) / 1000);
+    await ctx.reply(`⏳ Too many marketplace operations. Please wait ${waitTime} seconds.`, {
+      reply_markup: getMainMenuKeyboard()
+    });
+    return;
+  }
+
   // Check if marketplace is configured
   if (!marketplaceWritable || !customCardsWritable) {
     await ctx.reply("❌ Marketplace or contracts not properly configured.", {
@@ -1552,7 +1566,7 @@ Proceed with listing?`,
           topics: log.topics as string[],
           data: log.data
         });
-        if (parsed?.name === "Listed") {
+        if (parsed?.name === "NFTListed") {
           listingId = Number(parsed.args[0]);
           break;
         }

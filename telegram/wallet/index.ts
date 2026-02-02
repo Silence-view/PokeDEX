@@ -8,5 +8,6 @@ export {
   RateLimiter,
   exportKeyRateLimiter,
   withdrawRateLimiter,
+  marketplaceRateLimiter,
   type AutoDeleteOptions,
 } from "./walletManager.js";
