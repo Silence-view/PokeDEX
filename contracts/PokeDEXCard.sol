@@ -376,6 +376,22 @@ contract PokeDEXCard is
         _lastSalePrice[tokenId] = price;
     }
 
+    struct BattlePowerWithMetrics {
+        uint256 basePower;
+        uint256 rarityMultiplier;
+        uint256 maxExp;
+        uint256 expScaled;
+        uint256 baseScaled;
+        uint256 powerWithExp;
+        uint32 trades;
+        uint256 tradeBonus;
+        uint256 acquiredTime;
+        uint256 holderDays;
+        uint256 veteranBonus;
+        uint256 rawPriceBonus;
+        uint256 priceBonus;
+    }
+
     /**
      * @notice Calculate battle power including trade metrics and holding bonuses
      * @dev Extends base battle power with trade count bonus, veteran bonus, and price weight
@@ -387,36 +403,37 @@ contract PokeDEXCard is
 
         // Get base battle power
         CardStats memory stats = _cardStats[tokenId];
-        uint256 basePower = (uint256(stats.hp) * 2) +
+        BattlePowerWithMetrics memory metrics;
+        metrics.basePower = (uint256(stats.hp) * 2) +
                            (uint256(stats.attack) * 3) +
                            (uint256(stats.defense) * 2) +
                            (uint256(stats.speed) * 3);
 
-        uint256 rarityMultiplier = _getRarityMultiplier(stats.rarity);
+        metrics.rarityMultiplier = _getRarityMultiplier(stats.rarity);
 
         // Experience bonus
-        uint256 maxExp = uint256(MAX_EXPERIENCE);
-        uint256 expScaled = uint256(stats.experience) * 50;
-        uint256 baseScaled = 100 * maxExp;
-        uint256 powerWithExp = (basePower * rarityMultiplier * (baseScaled + expScaled)) / (10000 * maxExp);
+        metrics.maxExp = uint256(MAX_EXPERIENCE);
+        metrics.expScaled = uint256(stats.experience) * 50;
+        metrics.baseScaled = 100 * metrics.maxExp;
+        metrics.powerWithExp = (metrics.basePower * metrics.rarityMultiplier * (metrics.baseScaled + metrics.expScaled)) / (10000 * metrics.maxExp);
 
         // Trade count bonus: +0.5% per trade, max 25%
-        uint32 trades = _tradeCount[tokenId];
-        uint256 tradeBonus = trades > 0
-            ? (powerWithExp * _min(uint256(trades) * 5, 250)) / 1000
+        metrics.trades = _tradeCount[tokenId];
+        metrics.tradeBonus = metrics.trades > 0
+            ? (metrics.powerWithExp * _min(uint256(metrics.trades) * 5, 250)) / 1000
             : 0;
 
         // Veteran bonus: +10% if held > 30 days
-        uint256 acquiredTime = uint256(_acquiredAt[tokenId]);
-        uint256 holderDays = acquiredTime > 0 ? (block.timestamp - acquiredTime) / 1 days : 0;
-        uint256 veteranBonus = holderDays > 30 ? (powerWithExp * 10) / 100 : 0;
+        metrics.acquiredTime = uint256(_acquiredAt[tokenId]);
+        metrics.holderDays = metrics.acquiredTime > 0 ? (block.timestamp - metrics.acquiredTime) / 1 days : 0;
+        metrics.veteranBonus = metrics.holderDays > 30 ? (metrics.powerWithExp * 10) / 100 : 0;
 
         // Price weight: +1 power per 0.01 ETH of last sale price
         // Capped at 100 (equivalent to 1 ETH) to prevent wash trading exploitation
-        uint256 rawPriceBonus = _lastSalePrice[tokenId] / 0.01 ether;
-        uint256 priceBonus = rawPriceBonus > 100 ? 100 : rawPriceBonus;
+        metrics.rawPriceBonus = _lastSalePrice[tokenId] / 0.01 ether;
+        metrics.priceBonus = metrics.rawPriceBonus > 100 ? 100 : metrics.rawPriceBonus;
 
-        return powerWithExp + tradeBonus + veteranBonus + priceBonus;
+        return metrics.powerWithExp + metrics.tradeBonus + metrics.veteranBonus + metrics.priceBonus;
     }
 
     /**

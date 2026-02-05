@@ -838,6 +838,8 @@ contract BattleArena is
     // INTERNAL BATTLE EXECUTION
     // =============================================================================
 
+    
+
     /**
      * @dev Execute a battle and determine winner
      * @param battleId Battle ID to execute
@@ -845,23 +847,21 @@ contract BattleArena is
     function _executeBattle(uint256 battleId) internal {
         Battle storage battle = battles[battleId];
 
-        uint256 challengerCardId = uint256(battle.challengerCardId);
-        uint256 opponentCardId = uint256(battle.opponentCardId);
 
         // Get card stats
         IPokeDEXCard.CardStats memory challengerStats =
-            cardContract.getCardStats(challengerCardId);
+            cardContract.getCardStats(battle.challengerCardId);
         IPokeDEXCard.CardStats memory opponentStats =
-            cardContract.getCardStats(opponentCardId);
+            cardContract.getCardStats(battle.opponentCardId);
 
         // Calculate battle power with type advantage
         uint256 challengerPower = _calculatePowerWithTypeAdvantage(
-            challengerCardId,
+            battle.challengerCardId,
             challengerStats,
             opponentStats.pokemonType
         );
         uint256 opponentPower = _calculatePowerWithTypeAdvantage(
-            opponentCardId,
+            battle.opponentCardId,
             opponentStats,
             challengerStats.pokemonType
         );
@@ -887,15 +887,15 @@ contract BattleArena is
         if (challengerPower >= opponentPower) {
             winner = battle.challenger;
             loser = battle.opponent;
-            winnerCardId = challengerCardId;
-            loserCardId = opponentCardId;
+            winnerCardId = battle.challengerCardId;
+            loserCardId = battle.opponentCardId;
             winnerPower = originalChallengerPower;
             loserPower = originalOpponentPower;
         } else {
             winner = battle.opponent;
             loser = battle.challenger;
-            winnerCardId = opponentCardId;
-            loserCardId = challengerCardId;
+            winnerCardId = battle.opponentCardId;
+            loserCardId = battle.challengerCardId;
             winnerPower = originalOpponentPower;
             loserPower = originalChallengerPower;
         }
@@ -920,6 +920,23 @@ contract BattleArena is
         emit BattleResult(battleId, winner, winnerPower, loserPower);
     }
 
+    struct ExecuteBattleVars{
+        uint256 challengerPower;
+        uint256 opponentPower;
+        uint256 originalChallengerPower;
+        uint256 originalOpponentPower;
+        address winner;
+        address loser;
+        uint256 winnerCardId;
+        uint256 loserCardId;
+        uint256 winnerPower;
+        uint256 loserPower;
+        uint256 totalPool;
+        uint256 fee;
+        uint256 payout;
+
+    }
+
     /**
      * @dev Execute a battle with betting and distribute payouts
      * @param battleId Battle ID to execute
@@ -929,113 +946,105 @@ contract BattleArena is
         Battle storage battle = battles[battleId];
         BattleBet storage bet = battleBets[battleId];
 
-        uint256 challengerCardId = uint256(battle.challengerCardId);
-        uint256 opponentCardId = uint256(battle.opponentCardId);
+        ExecuteBattleVars memory executeBattleVars;
 
         // Get card stats
         IPokeDEXCard.CardStats memory challengerStats =
-            cardContract.getCardStats(challengerCardId);
+            cardContract.getCardStats(battle.challengerCardId);
         IPokeDEXCard.CardStats memory opponentStats =
-            cardContract.getCardStats(opponentCardId);
+            cardContract.getCardStats(battle.opponentCardId);
 
         // Calculate battle power with type advantage and metrics
-        uint256 challengerPower = _calculatePowerWithMetrics(
-            challengerCardId,
+        executeBattleVars.challengerPower = _calculatePowerWithMetrics(
+            battle.challengerCardId,
             challengerStats,
             opponentStats.pokemonType
         );
-        uint256 opponentPower = _calculatePowerWithMetrics(
-            opponentCardId,
+        executeBattleVars.opponentPower = _calculatePowerWithMetrics(
+            battle.opponentCardId,
             opponentStats,
             challengerStats.pokemonType
         );
 
         // Store original powers for event
-        uint256 originalChallengerPower = challengerPower;
-        uint256 originalOpponentPower = opponentPower;
+        executeBattleVars.originalChallengerPower = executeBattleVars.challengerPower;
+        executeBattleVars.originalOpponentPower = executeBattleVars.opponentPower;
 
         // Deterministic tiebreaker: speed first, then card age (lower ID = older = wins)
         // Note: This is intentionally deterministic to prevent miner manipulation.
         // For randomized outcomes with high stakes, integrate VRF/QRNG.
-        if (challengerPower == opponentPower) {
+        if (executeBattleVars.challengerPower == executeBattleVars.opponentPower) {
             // First tiebreaker: speed stat
             if (challengerStats.speed != opponentStats.speed) {
-                challengerPower += challengerStats.speed;
-                opponentPower += opponentStats.speed;
+                executeBattleVars.challengerPower += challengerStats.speed;
+                executeBattleVars.opponentPower += opponentStats.speed;
             } else {
                 // Second tiebreaker: older card (lower ID) wins
                 // This rewards early adopters and is fully predictable
-                if (challengerCardId < opponentCardId) {
-                    challengerPower += 1;
+                if (battle.challengerCardId < battle.opponentCardId) {
+                    executeBattleVars.challengerPower += 1;
                 } else {
-                    opponentPower += 1;
+                    executeBattleVars.opponentPower += 1;
                 }
             }
         }
 
         // Determine winner
-        address winner;
-        address loser;
-        uint256 winnerCardId;
-        uint256 loserCardId;
-        uint256 winnerPower;
-        uint256 loserPower;
-
-        if (challengerPower >= opponentPower) {
-            winner = battle.challenger;
-            loser = battle.opponent;
-            winnerCardId = challengerCardId;
-            loserCardId = opponentCardId;
-            winnerPower = originalChallengerPower;
-            loserPower = originalOpponentPower;
+        if (executeBattleVars.challengerPower >= executeBattleVars.opponentPower) {
+            executeBattleVars.winner = battle.challenger;
+            executeBattleVars.loser = battle.opponent;
+            executeBattleVars.winnerCardId = battle.challengerCardId;
+            executeBattleVars.loserCardId = battle.opponentCardId;
+            executeBattleVars.winnerPower = executeBattleVars.originalChallengerPower;
+            executeBattleVars.loserPower = executeBattleVars.originalOpponentPower;
         } else {
-            winner = battle.opponent;
-            loser = battle.challenger;
-            winnerCardId = opponentCardId;
-            loserCardId = challengerCardId;
-            winnerPower = originalOpponentPower;
-            loserPower = originalChallengerPower;
+            executeBattleVars.winner = battle.opponent;
+            executeBattleVars.loser = battle.challenger;
+            executeBattleVars.winnerCardId = battle.opponentCardId;
+            executeBattleVars.loserCardId = battle.challengerCardId;
+            executeBattleVars.winnerPower = executeBattleVars.originalOpponentPower;
+            executeBattleVars.loserPower = executeBattleVars.originalChallengerPower;
         }
 
         // Calculate payout before state changes
-        uint256 totalPool = bet.challengerStake + bet.opponentStake;
-        uint256 fee = (totalPool * bettingFee) / 10000;
-        uint256 payout = totalPool - fee;
+        executeBattleVars.totalPool = bet.challengerStake + bet.opponentStake;
+        executeBattleVars.fee = (executeBattleVars.totalPool * bettingFee) / 10000;
+        executeBattleVars.payout = executeBattleVars.totalPool - executeBattleVars.fee;
 
         // EFFECTS: Update ALL state BEFORE any external calls
-        battle.winner = winner;
+        battle.winner = executeBattleVars.winner;
         battle.status = BattleStatus.Completed;
         battle.completedAt = uint48(block.timestamp);
         bet.paid = true;
-        totalFeesCollected += fee;
+        totalFeesCollected += executeBattleVars.fee;
 
         // Update player stats
-        _updatePlayerStats(winner, loser);
+        _updatePlayerStats(executeBattleVars.winner, executeBattleVars.loser);
 
         // Clean up pending/active arrays
         _removeFromArray(activeChallenges[battle.challenger], battleId);
         _removeFromArray(pendingChallenges[battle.opponent], battleId);
 
         // Emit events before external calls
-        emit BattleCompleted(battleId, winner, winnerCardId);
-        emit BattleResult(battleId, winner, winnerPower, loserPower);
-        emit BattlePayout(battleId, winner, payout, fee);
-        emit WinningsDistributed(battleId, winner, payout);
+        emit BattleCompleted(battleId, executeBattleVars.winner, executeBattleVars.winnerCardId);
+        emit BattleResult(battleId, executeBattleVars.winner, executeBattleVars.winnerPower, executeBattleVars.loserPower);
+        emit BattlePayout(battleId, executeBattleVars.winner, executeBattleVars.payout, executeBattleVars.fee);
+        emit WinningsDistributed(battleId, executeBattleVars.winner, executeBattleVars.payout);
 
         // INTERACTIONS: External calls LAST
         // Pay winner first (critical - must succeed)
-        (bool success, ) = payable(winner).call{value: payout}("");
+        (bool success, ) = payable(executeBattleVars.winner).call{value: executeBattleVars.payout}("");
         require(success, "Payout failed");
 
         // Experience rewards (non-critical - use try-catch to not block payouts)
         // Experience can fail if card is burned or at max level, but payout is already done
-        try cardContract.addExperience(winnerCardId, winnerExpReward) {
+        try cardContract.addExperience(executeBattleVars.winnerCardId, winnerExpReward) {
             // Success - experience added
         } catch {
             // Silently fail - payout already done, experience is bonus
         }
 
-        try cardContract.addExperience(loserCardId, loserExpReward) {
+        try cardContract.addExperience(executeBattleVars.loserCardId, loserExpReward) {
             // Success - experience added
         } catch {
             // Silently fail - card might be burned or at max level
