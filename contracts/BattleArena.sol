@@ -263,7 +263,7 @@ contract BattleArena is
      * @dev Validates ownership, timeout, and executes battle with type advantages
      * @param battleId Battle ID to accept (must be pending and not expired)
      * @param cardId Opponent's card token ID (must be owned by msg.sender)
-     */
+     
     function acceptChallenge(uint256 battleId, uint256 cardId)
         external
         override
@@ -298,7 +298,7 @@ contract BattleArena is
 
         // Execute battle immediately
         _executeBattle(battleId);
-    }
+    }*/
 
     /**
      * @notice Cancel a pending challenge
@@ -409,7 +409,7 @@ contract BattleArena is
      * @dev Must send exactly the same amount as challenger's stake
      * @param battleId Battle ID to accept (must be pending betting battle)
      * @param cardId Opponent's card token ID (must be owned by msg.sender)
-     */
+     
     function acceptChallengeWithBet(uint256 battleId, uint256 cardId)
         external
         payable
@@ -445,7 +445,7 @@ contract BattleArena is
 
         // Execute battle and distribute payouts
         _executeBattleWithBetting(battleId);
-    }
+    }*/
 
     /**
      * @notice Get battle bet details
@@ -843,7 +843,7 @@ contract BattleArena is
     /**
      * @dev Execute a battle and determine winner
      * @param battleId Battle ID to execute
-     */
+     
     function _executeBattle(uint256 battleId) internal {
         Battle storage battle = battles[battleId];
 
@@ -918,7 +918,7 @@ contract BattleArena is
 
         emit BattleCompleted(battleId, winner, winnerCardId);
         emit BattleResult(battleId, winner, winnerPower, loserPower);
-    }
+    }*/
 
     struct ExecuteBattleVars{
         uint256 challengerPower;
@@ -941,7 +941,7 @@ contract BattleArena is
      * @dev Execute a battle with betting and distribute payouts
      * @param battleId Battle ID to execute
      * @notice Follows Checks-Effects-Interactions pattern for reentrancy safety
-     */
+     
     function _executeBattleWithBetting(uint256 battleId) internal {
         Battle storage battle = battles[battleId];
         BattleBet storage bet = battleBets[battleId];
@@ -1049,7 +1049,7 @@ contract BattleArena is
         } catch {
             // Silently fail - card might be burned or at max level
         }
-    }
+    }*/
 
     // =============================================================================
     // INTERNAL HELPER FUNCTIONS
@@ -1061,7 +1061,7 @@ contract BattleArena is
      * @param stats Card stats
      * @param defenderType Defender's Pokemon type
      * @return Modified battle power with metrics
-     */
+     
     function _calculatePowerWithMetrics(
         uint256 cardId,
         IPokeDEXCard.CardStats memory stats,
@@ -1083,14 +1083,14 @@ contract BattleArena is
             return _calculatePowerWithTypeAdvantage(cardId, stats, defenderType);
         }
     }
-
+*/
     /**
      * @dev Calculate power with type advantage modifier
      * @param cardId Card token ID
      * @param stats Card stats
      * @param defenderType Defender's Pokemon type
      * @return Modified battle power
-     */
+     
     function _calculatePowerWithTypeAdvantage(
         uint256 cardId,
         IPokeDEXCard.CardStats memory stats,
@@ -1112,7 +1112,7 @@ contract BattleArena is
 
         return basePower; // Normal: 1x
     }
-
+*/
     /**
      * @dev Update player statistics after battle
      * @param winner Winner address

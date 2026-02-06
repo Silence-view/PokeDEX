@@ -187,17 +187,17 @@ interface IPokeDEXCard {
      * @dev Battle power formula: weighted sum of stats with rarity multiplier and experience bonus
      * @param tokenId Token ID to calculate battle power for
      * @return battlePower The calculated battle power value (higher is stronger)
-     */
+     
     function calculateBattlePower(uint256 tokenId) external view returns (uint256 battlePower);
-
+*/
     /**
      * @notice Calculate battle power including trade metrics and holding bonuses
      * @dev Extends base battle power with trade count bonus, veteran bonus, and price weight
      * @param tokenId Token ID to calculate enhanced battle power for
      * @return enhancedPower Battle power including all metric-based bonuses
-     */
+     
     function calculateBattlePowerWithMetrics(uint256 tokenId) external view returns (uint256 enhancedPower);
-
+*/
     /**
      * @notice Get total number of cards minted
      * @dev This is a simple counter and does not account for burned tokens

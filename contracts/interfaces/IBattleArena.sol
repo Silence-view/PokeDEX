@@ -170,9 +170,9 @@ interface IBattleArena {
      * @dev Challenge must not be expired
      * @param battleId Battle ID to accept
      * @param cardId Opponent's card token ID
-     */
+     
     function acceptChallenge(uint256 battleId, uint256 cardId) external;
-
+*/
     /**
      * @notice Cancel a pending challenge
      * @dev Can only be cancelled by challenger or if timeout has passed
@@ -198,9 +198,9 @@ interface IBattleArena {
      * @dev Must send exact same amount as challenger's stake
      * @param battleId Battle ID to accept
      * @param cardId Opponent's card token ID
-     */
+     
     function acceptChallengeWithBet(uint256 battleId, uint256 cardId) external payable;
-
+*/
     // =============================================================================
     // VIEW FUNCTIONS
     // =============================================================================

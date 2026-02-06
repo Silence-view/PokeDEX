@@ -3,13 +3,22 @@
   "version": "1.0.0",
   "type": "module",
   "dependencies": {
+    "@chainlink/contracts": "^1.2.0",
+    "@grammyjs/conversations": "^2.1.1",
+    "@grammyjs/ratelimiter": "^1.2.1",
     "@openzeppelin/contracts": "^5.0.0",
-    "@chainlink/contracts": "^1.2.0"
+    "@pinata/sdk": "^2.1.0",
+    "dotenv": "^17.2.4",
+    "grammy": "^1.39.3",
+    "tsx": "^4.21.0",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
+    "@nomicfoundation/hardhat-ethers": "^4.0.4",
     "@nomicfoundation/hardhat-ignition": "^3.0.7",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.2",
     "@types/node": "^22.19.7",
+    "ethers": "^6.16.0",
     "forge-std": "github:foundry-rs/forge-std#v1.9.4",
     "hardhat": "^3.1.5",
     "typescript": "~5.8.3",

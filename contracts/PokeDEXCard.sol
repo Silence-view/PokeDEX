@@ -15,6 +15,7 @@ import "./interfaces/IPokeDEXCard.sol";
  * @custom:security-contact security@pokedex.example
  */
 contract PokeDEXCard is
+    ERC721,
     ERC721URIStorage,
     AccessControl,
     ReentrancyGuard,
@@ -200,12 +201,13 @@ contract PokeDEXCard is
         emit CardStatsUpdated(tokenId, card.experience);
     }
 
+    
     /**
      * @notice Calculate the battle power of a card based on its stats and rarity
      * @dev Battle power formula: weighted sum of stats with rarity multiplier and experience bonus
      * @param tokenId Token ID to calculate battle power for
      * @return battlePower The calculated battle power value (higher is stronger)
-     */
+     
     function calculateBattlePower(uint256 tokenId) external view returns (uint256) {
         _requireOwned(tokenId);
         CardStats memory stats = _cardStats[tokenId];
@@ -229,6 +231,7 @@ contract PokeDEXCard is
 
         return (basePower * rarityMultiplier * (baseScaled + expScaled)) / (10000 * maxExp);
     }
+    */
 
     /**
      * @notice Get total number of cards minted
@@ -310,6 +313,22 @@ contract PokeDEXCard is
         _transferInitiator = address(0);
     }
 
+    // The following functions are overrides required by Solidity.
+
+    /**
+     * @notice Returns URI of a Token
+     * @param tokenId Token Identifier
+     * @return The URI of the Token
+     */
+    function tokenURI(uint256 tokenId)
+        public
+        view
+        override(ERC721, ERC721URIStorage)
+        returns (string memory)
+    {
+        return super.tokenURI(tokenId);
+    }
+
     /**
      * @notice Check if contract supports an interface
      * @param interfaceId Interface identifier
@@ -318,7 +337,7 @@ contract PokeDEXCard is
     function supportsInterface(bytes4 interfaceId)
         public
         view
-        override(ERC721URIStorage, AccessControl)
+        override(ERC721, ERC721URIStorage, AccessControl)
         returns (bool)
     {
         return super.supportsInterface(interfaceId);
@@ -376,6 +395,7 @@ contract PokeDEXCard is
         _lastSalePrice[tokenId] = price;
     }
 
+    /*
     struct BattlePowerWithMetrics {
         uint256 basePower;
         uint256 rarityMultiplier;
@@ -391,13 +411,13 @@ contract PokeDEXCard is
         uint256 rawPriceBonus;
         uint256 priceBonus;
     }
-
+    */
     /**
      * @notice Calculate battle power including trade metrics and holding bonuses
      * @dev Extends base battle power with trade count bonus, veteran bonus, and price weight
      * @param tokenId Token ID to calculate enhanced battle power for
      * @return enhancedPower Battle power including all metric-based bonuses
-     */
+     
     function calculateBattlePowerWithMetrics(uint256 tokenId) external view returns (uint256) {
         _requireOwned(tokenId);
 
@@ -434,7 +454,7 @@ contract PokeDEXCard is
         metrics.priceBonus = metrics.rawPriceBonus > 100 ? 100 : metrics.rawPriceBonus;
 
         return metrics.powerWithExp + metrics.tradeBonus + metrics.veteranBonus + metrics.priceBonus;
-    }
+    }*/
 
     /**
      * @dev Override _update to track transfers for trade metrics and ownership enumeration
@@ -542,12 +562,14 @@ contract PokeDEXCard is
      * @dev Get rarity multiplier for battle power calculation
      * @param rarity Card rarity
      * @return Multiplier value (100-300)
-     */
+     
     function _getRarityMultiplier(Rarity rarity) internal pure returns (uint256) {
         if (rarity == Rarity.Common) return 100;
         if (rarity == Rarity.Uncommon) return 120;
         if (rarity == Rarity.Rare) return 150;
         if (rarity == Rarity.UltraRare) return 200;
         return 300; // Legendary
-    }
+    }*/
+
+    
 }

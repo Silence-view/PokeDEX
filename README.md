@@ -131,7 +131,7 @@ REPORT_GAS=true pnpm test
 pnpm run deploy:sepolia
 
 # Start Telegram bot
-pnpm run bot
+pnpm tsx telegram/bot.ts
 ```
 
 ## Project Structure
