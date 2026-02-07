@@ -157,6 +157,34 @@ export class SessionStore {
       this.save(session);
     }
   }
+
+  /**
+   * Cerca una sessione utente dato un indirizzo wallet Ethereum.
+   * Finds a user session by their Ethereum wallet address.
+   *
+   * Usato dal sistema di notifiche per mappare l'indirizzo del venditore
+   * (emesso dall'evento NFTSold on-chain) al suo ID Telegram.
+   *
+   * Used by the notification system to map a seller's address
+   * (emitted by the on-chain NFTSold event) to their Telegram ID.
+   *
+   * @param address - Indirizzo Ethereum da cercare / Ethereum address to search for
+   * @returns La sessione utente corrispondente, o null se non trovata /
+   *          The matching user session, or null if not found
+   */
+  getAll(): UserSession[] {
+    return Array.from(this.sessions.values());
+  }
+
+  findByWalletAddress(address: string): UserSession | null {
+    const lowerAddress = address.toLowerCase();
+    for (const session of this.sessions.values()) {
+      if (session.walletAddress?.toLowerCase() === lowerAddress) {
+        return session;
+      }
+    }
+    return null;
+  }
 }
 
 // =============================================================================

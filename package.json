@@ -1,6 +1,19 @@
 {
   "name": "PokeDex",
   "version": "1.0.0",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:cjs": "hardhat test test/Basic.test.cjs",
+    "deploy:sepolia": "hardhat run scripts/deploy-new.ts --network sepolia",
+    "deploy:custom-cards": "tsx scripts/deploy-custom-cards-v2.ts",
+    "verify": "hardhat run scripts/verify.ts --network sepolia",
+    "check-connection": "hardhat run scripts/check-connection.ts --network sepolia",
+    "generate-metadata": "tsx scripts/generate-metadata.ts",
+    "bot": "tsx telegram/bot.ts",
+    "bot:dev": "tsx watch telegram/bot.ts",
+    "clean": "hardhat clean"
+  },
   "type": "module",
   "dependencies": {
     "@chainlink/contracts": "^1.2.0",
@@ -21,6 +34,7 @@
     "ethers": "^6.16.0",
     "forge-std": "github:foundry-rs/forge-std#v1.9.4",
     "hardhat": "^3.1.5",
+    "tsx": "^4.21.0",
     "typescript": "~5.8.3",
     "viem": "^2.45.0"
   }

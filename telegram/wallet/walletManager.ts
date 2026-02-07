@@ -420,17 +420,55 @@ export class WalletManager {
     const encryptedData = data.encryptedPrivateKey.slice(0, -this.authTagLength * 2);
     const authTag = Buffer.from(data.encryptedPrivateKey.slice(-this.authTagLength * 2), "hex");
 
-    const decipher = crypto.createDecipheriv(this.algorithm, derivedKey, iv);
-    decipher.setAuthTag(authTag);
+    try {
+      const decipher = crypto.createDecipheriv(this.algorithm, derivedKey, iv);
+      decipher.setAuthTag(authTag);
 
-    let decrypted = decipher.update(encryptedData, "hex", "utf8");
-    decrypted += decipher.final("utf8");
+      let decrypted = decipher.update(encryptedData, "hex", "utf8");
+      decrypted += decipher.final("utf8");
 
-    // Update last used (atomic write)
-    data.lastUsed = Date.now();
-    atomicWriteFileSync(filePath, JSON.stringify(data, null, 2), 0o600);
+      // Update last used (atomic write)
+      data.lastUsed = Date.now();
+      atomicWriteFileSync(filePath, JSON.stringify(data, null, 2), 0o600);
 
-    return new ethers.Wallet(decrypted, this.provider);
+      return new ethers.Wallet(decrypted, this.provider);
+    } catch (error: any) {
+      // AES-GCM decryption errors indicate wallet data corruption or key mismatch
+      if (error.message?.includes("Unsupported state") ||
+          error.message?.includes("unable to authenticate")) {
+        console.error(`[WalletManager] Decryption failed for user ${userId}, wallet ${targetId}`);
+        throw new Error(
+          "Wallet access failed. The wallet data may be corrupted or the encryption key changed. " +
+          "Please create a new wallet from the Wallet menu."
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Verify that a user's wallet can be decrypted successfully.
+   * Returns true if wallet is accessible, false if corrupted.
+   */
+  async verifyWalletIntegrity(userId: number, walletId?: string): Promise<boolean> {
+    try {
+      const signer = await this.getSigner(userId, walletId);
+      // Quick verification - sign a test message
+      await signer.signMessage("verify");
+      return true;
+    } catch (error: any) {
+      console.error(`[WalletManager] Wallet integrity check failed for user ${userId}:`, error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Get the active wallet ID for a user
+   */
+  getActiveWalletId(userId: number): string | null {
+    this.migrateOldWallet(userId);
+    const index = this.loadIndex(userId);
+    return index.activeWalletId || null;
   }
 
   async exportPrivateKey(userId: number, walletId?: string): Promise<string> {

@@ -59,6 +59,12 @@ contract PokeDEXCustomCards is
     /// @notice Mapping for banned token IDs (content moderation)
     mapping(uint256 => bool) public bannedTokens;
 
+    /// @notice Mapping from owner to list of owned token IDs (for enumeration)
+    mapping(address => uint256[]) private _ownedTokens;
+
+    /// @notice Mapping from token ID to index in owner's token list
+    mapping(uint256 => uint256) private _ownedTokensIndex;
+
     /// @notice Events
     event CardCreated(
         uint256 indexed tokenId,
@@ -302,6 +308,15 @@ contract PokeDEXCustomCards is
     }
 
     /**
+     * @notice Get all token IDs owned by an address
+     * @param owner Address to query
+     * @return Array of token IDs owned by the address
+     */
+    function tokensOfOwner(address owner) external view returns (uint256[] memory) {
+        return _ownedTokens[owner];
+    }
+
+    /**
      * @notice Get creator's cards
      * @param creator Creator address
      * @return Array of token IDs
@@ -490,7 +505,7 @@ contract PokeDEXCustomCards is
     }
 
     /**
-     * @notice Override transfer to check banned status
+     * @notice Override transfer to check banned status and track ownership
      */
     function _update(address to, uint256 tokenId, address auth)
         internal
@@ -498,6 +513,41 @@ contract PokeDEXCustomCards is
         returns (address)
     {
         require(!bannedTokens[tokenId], "Card is banned");
+        address from = _ownerOf(tokenId);
+
+        // Update ownership enumeration
+        if (from != address(0)) {
+            _removeTokenFromOwnerEnumeration(from, tokenId);
+        }
+        if (to != address(0)) {
+            _addTokenToOwnerEnumeration(to, tokenId);
+        }
+
         return super._update(to, tokenId, auth);
+    }
+
+    /**
+     * @dev Add token to owner's enumeration list
+     */
+    function _addTokenToOwnerEnumeration(address to, uint256 tokenId) private {
+        _ownedTokensIndex[tokenId] = _ownedTokens[to].length;
+        _ownedTokens[to].push(tokenId);
+    }
+
+    /**
+     * @dev Remove token from owner's enumeration list using swap-and-pop
+     */
+    function _removeTokenFromOwnerEnumeration(address from, uint256 tokenId) private {
+        uint256 lastTokenIndex = _ownedTokens[from].length - 1;
+        uint256 tokenIndex = _ownedTokensIndex[tokenId];
+
+        if (tokenIndex != lastTokenIndex) {
+            uint256 lastTokenId = _ownedTokens[from][lastTokenIndex];
+            _ownedTokens[from][tokenIndex] = lastTokenId;
+            _ownedTokensIndex[lastTokenId] = tokenIndex;
+        }
+
+        _ownedTokens[from].pop();
+        delete _ownedTokensIndex[tokenId];
     }
 }

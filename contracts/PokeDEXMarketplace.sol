@@ -400,10 +400,12 @@ contract PokeDEXMarketplace is AccessControl, ReentrancyGuard, Pausable {
      * @dev Handles marketplace fees, ERC-2981 royalties, and seller payment
      * @dev Excess payment is automatically refunded to the buyer
      * @param listingId The unique identifier of the listing to purchase
+     * @param expectedPrice The price the buyer expects to pay (front-running protection)
      */
-    function buyNFT(uint256 listingId) external payable nonReentrant whenNotPaused {
+    function buyNFT(uint256 listingId, uint256 expectedPrice) external payable nonReentrant whenNotPaused {
         Listing storage listing = listings[listingId];
         require(listing.active, "Listing not active");
+        require(listing.price == expectedPrice, "Price changed");
         require(msg.value >= listing.price, "Insufficient payment");
         require(msg.sender != listing.seller, "Buyer cannot be the seller");
 

@@ -66,10 +66,11 @@ async function main() {
   const cardPackQRNGAddress = await cardPackQRNG.getAddress();
   console.log("   ✅ CardPackQRNG:", cardPackQRNGAddress);
 
-  // 4. Grant MINTER_ROLE to CardPackQRNG on PokeDEXCard
+  // 4. Grant roles on PokeDEXCard
   console.log("\n4️⃣  Granting roles...");
   const pokeDEXCard = await ethers.getContractAt("PokeDEXCard", POKEDEX_CARD);
   const MINTER_ROLE = ethers.keccak256(ethers.toUtf8Bytes("MINTER_ROLE"));
+  const MARKETPLACE_ROLE = ethers.keccak256(ethers.toUtf8Bytes("MARKETPLACE_ROLE"));
 
   try {
     const tx = await pokeDEXCard.grantRole(MINTER_ROLE, cardPackQRNGAddress);
@@ -77,6 +78,16 @@ async function main() {
     console.log("   ✅ Granted MINTER_ROLE to CardPackQRNG");
   } catch (error: any) {
     console.log("   ⚠️  Could not grant MINTER_ROLE. You may need to do this manually.");
+    console.log("      Error:", error.message);
+  }
+
+  // Grant MARKETPLACE_ROLE to Marketplace for setLastSalePrice
+  try {
+    const tx = await pokeDEXCard.grantRole(MARKETPLACE_ROLE, marketplaceAddress);
+    await tx.wait();
+    console.log("   ✅ Granted MARKETPLACE_ROLE to Marketplace");
+  } catch (error: any) {
+    console.log("   ⚠️  Could not grant MARKETPLACE_ROLE. You may need to do this manually.");
     console.log("      Error:", error.message);
   }
 
