@@ -1,17 +1,36 @@
 {
   "name": "PokeDex",
   "version": "1.0.0",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "test:cjs": "hardhat test test/Basic.test.cjs",
+    "deploy:sepolia": "hardhat run scripts/deploy-new.ts --network sepolia",
+    "deploy:custom-cards": "tsx scripts/deploy-custom-cards-v2.ts",
+    "verify": "hardhat run scripts/verify.ts --network sepolia",
+    "check-connection": "hardhat run scripts/check-connection.ts --network sepolia",
+    "generate-metadata": "tsx scripts/generate-metadata.ts",
+    "bot": "tsx telegram/bot.ts",
+    "bot:dev": "tsx watch telegram/bot.ts",
+    "clean": "hardhat clean"
+  },
   "type": "module",
   "dependencies": {
+    "@chainlink/contracts": "^1.2.0",
+    "@grammyjs/conversations": "^2.1.1",
+    "@grammyjs/ratelimiter": "^1.2.1",
     "@openzeppelin/contracts": "^5.0.0",
-    "@chainlink/contracts": "^1.2.0"
+    "@pinata/sdk": "^2.1.0",
+    "dotenv": "^17.2.4",
+    "ethers": "^6.16.0",
+    "grammy": "^1.39.3",
+    "uuid": "^13.0.0"
   },
   "devDependencies": {
-    "@nomicfoundation/hardhat-ignition": "^3.0.7",
     "@nomicfoundation/hardhat-toolbox-viem": "^5.0.2",
     "@types/node": "^22.19.7",
-    "forge-std": "github:foundry-rs/forge-std#v1.9.4",
     "hardhat": "^3.1.5",
+    "tsx": "^4.21.0",
     "typescript": "~5.8.3",
     "viem": "^2.45.0"
   }

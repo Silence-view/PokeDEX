@@ -49,3 +49,13 @@ data/
 # Temporary files
 *.tmp
 *.temp
+
+# Lock files for non-chosen package managers
+pnpm-lock.yaml
+yarn.lock
+
+# Hardhat Ignition deployments
+ignition/deployments/
+
+# Generated metadata
+metadata/generated/

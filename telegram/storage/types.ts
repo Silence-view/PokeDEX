@@ -4,17 +4,10 @@
 
 export type SessionState =
   | "idle"
-  | "awaiting_wallet"
   | "awaiting_withdraw_address"
   | "awaiting_withdraw_amount"
-  | "creating_card"
-  | "collecting_name"
   | "collecting_card_name"
   | "collecting_type"
-  | "collecting_hp"
-  | "collecting_attack"
-  | "collecting_defense"
-  | "collecting_speed"
   | "collecting_rarity"
   | "collecting_image"
   | "collecting_description"
@@ -29,8 +22,7 @@ export type DraftStatus =
   | "uploading"
   | "minting"
   | "minted"
-  | "failed"
-  | "abandoned";
+  | "failed";
 
 export interface UserSession {
   telegramUserId: number;
@@ -49,6 +41,8 @@ export interface UserSession {
   pendingAction?: string;
   // Withdraw flow
   pendingWithdrawAddress?: string;
+  // Custom card sell flow
+  pendingCardSell?: number;
 }
 
 export interface CardDraft {
@@ -92,6 +86,7 @@ export interface CardDraft {
   mintedAt?: number;
   mintTxHash?: string;
   mintedTokenId?: number;
+  mintedContractAddress?: string;
   errorMessage?: string;
 }
 
