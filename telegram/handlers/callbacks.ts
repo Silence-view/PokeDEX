@@ -33,22 +33,25 @@
 //
 // =============================================================================
 
-import { InlineKeyboard } from "grammy";
+import { InlineKeyboard, InputMediaBuilder, GrammyError } from "grammy";
 import { ethers } from "ethers";
 import { CONTRACTS, NETWORK, POKEMON_TYPES, TYPE_EMOJIS, RARITIES } from "../config.js";
-import { provider, customCardsContract } from "../contracts/provider.js";
+import { provider, customCardsContract, marketplaceContract } from "../contracts/provider.js";
 import { draftStore } from "../storage/index.js";
 import { getUserWalletAddress } from "../services/wallet-helpers.js";
-import { sanitizeForMarkdown } from "../services/ipfs.js";
-import { getMainMenuKeyboard } from "../bot/menu.js";
+import { sanitizeForMarkdown, fetchNFTMetadata } from "../services/ipfs.js";
+import { getMainMenuKeyboard, getWelcomeMessage } from "../bot/menu.js";
 import { SECURITY_NOTICE, ANTI_PHISHING_WARNING } from "../bot/security.js";
 import { bot } from "../bot/setup.js";
 import {
   showHelp, showMyCards, showCardDetails,
-  showMarketplace, showMyListings, showWallet, showContracts, showMyDrafts
+  showMarketplace, showMyListings, showWallet, showContracts, showMyDrafts,
+  buildMyCardView, getCardEntries, enrichCardEntry, buildMyCardsGrid
 } from "./actions.js";
 import { registerMarketplaceCallbacks } from "./marketplace-callbacks.js";
 import { registerWalletCallbacks } from "./wallet-callbacks.js";
+import { buildShareMessage } from "../services/promo.js";
+import { sessionStore } from "../storage/index.js";
 
 // =============================================================================
 // REGISTRAZIONE CALLBACK HANDLERS - Funzione principale di setup
@@ -99,6 +102,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_my_cards", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await showMyCards(ctx);
   });
 
@@ -114,6 +118,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_create_card", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await ctx.conversation.enter("cardCreationConversation");
   });
 
@@ -127,6 +132,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_marketplace", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await showMarketplace(ctx);
   });
 
@@ -138,6 +144,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_wallet", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await showWallet(ctx);
   });
 
@@ -149,6 +156,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_contracts", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await showContracts(ctx);
   });
 
@@ -162,7 +170,11 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_security", async (ctx) => {
     await ctx.answerCallbackQuery();
-    await ctx.reply(SECURITY_NOTICE + "\n" + ANTI_PHISHING_WARNING, { parse_mode: "Markdown" });
+    try { await ctx.deleteMessage(); } catch {}
+    await ctx.reply(SECURITY_NOTICE + "\n" + ANTI_PHISHING_WARNING, {
+      parse_mode: "Markdown",
+      reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu"),
+    });
   });
 
   /**
@@ -173,26 +185,42 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_help", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await showHelp(ctx);
   });
 
   /**
-   * Pulisce la chat inviando righe vuote e mostra il menu principale.
-   * Clears the chat by sending blank lines and shows the main menu.
+   * Mostra un messaggio promozionale condivisibile con GIF Pokemon.
+   * Shows a shareable promotional message with Pokemon GIF.
    *
-   * callback_data: "action_clear"
-   * Tecnica: invia 50 righe vuote per "spingere" i messaggi vecchi fuori
-   * dalla vista. Non cancella realmente i messaggi (impossibile nelle chat private).
-   * Technique: sends 50 blank lines to "push" old messages out of view.
-   * Does not actually delete messages (not possible in private chats).
+   * callback_data: "action_share"
+   * Genera un link di condivisione personalizzato per l'utente e
+   * invia una GIF animata Pokemon con il messaggio promozionale.
+   *
+   * Generates a personalized share link for the user and sends
+   * an animated Pokemon GIF with the promotional message.
    */
-  bot.callbackQuery("action_clear", async (ctx) => {
+  bot.callbackQuery("action_share", async (ctx) => {
     await ctx.answerCallbackQuery();
-    const clearScreen = "\n".repeat(50);
-    await ctx.reply(clearScreen + "🧹 *Chat cleared!*\n\nWhat would you like to do?", {
-      parse_mode: "Markdown",
-      reply_markup: getMainMenuKeyboard()
-    });
+    try { await ctx.deleteMessage(); } catch {}
+
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const { caption, gif, keyboard } = buildShareMessage(userId);
+
+    try {
+      await ctx.replyWithAnimation(gif, {
+        caption,
+        parse_mode: "Markdown",
+        reply_markup: keyboard,
+      });
+    } catch {
+      await ctx.reply(caption, {
+        parse_mode: "Markdown",
+        reply_markup: keyboard,
+      });
+    }
   });
 
   /**
@@ -203,6 +231,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_my_listings", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await showMyListings(ctx);
   });
 
@@ -224,6 +253,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_my_offers", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
 
     const userId = ctx.from?.id;
     if (!userId) return;
@@ -246,10 +276,16 @@ export function registerCallbackHandlers() {
       return;
     }
 
+    const loadingMsg = await ctx.reply("🔄 Loading your offers...");
+
     try {
       // Recupera gli ID delle offerte dal contratto on-chain
       // Retrieve offer IDs from the on-chain contract
       const offerIds = await marketplaceContract.getBuyerOffers(walletAddress);
+
+      try {
+        await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+      } catch {}
 
       if (offerIds.length === 0) {
         await ctx.reply("📭 You don't have any active offers!");
@@ -273,6 +309,9 @@ export function registerCallbackHandlers() {
       await ctx.reply(message, { parse_mode: "Markdown" });
     } catch (error) {
       console.error("Error showing offers:", error);
+      try {
+        await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+      } catch {}
       await ctx.reply("❌ Error loading offers. Please try again.");
     }
   });
@@ -289,6 +328,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("action_sell", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await ctx.conversation.enter("listCardConversation");
   });
 
@@ -302,7 +342,12 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("main_menu", async (ctx) => {
     await ctx.answerCallbackQuery();
-    await ctx.reply("🏠 Main Menu:", { reply_markup: getMainMenuKeyboard() });
+    try { await ctx.deleteMessage(); } catch {}
+    const firstName = ctx.from?.first_name;
+    await ctx.reply(getWelcomeMessage(firstName), {
+      parse_mode: "Markdown",
+      reply_markup: getMainMenuKeyboard(),
+    });
   });
 
   /**
@@ -315,6 +360,7 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery("my_drafts", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     await showMyDrafts(ctx);
   });
 
@@ -343,10 +389,237 @@ export function registerCallbackHandlers() {
    */
   bot.callbackQuery(/^view_card_(\d+)$/, async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     const match = ctx.callbackQuery.data.match(/^view_card_(\d+)$/);
     if (!match) return;
     const cardId = parseInt(match[1]);
     await showCardDetails(ctx, cardId);
+  });
+
+  /**
+   * Naviga a una specifica carta nel carousel "My Cards" (lazy loading).
+   * Navigates to a specific card in the "My Cards" carousel (lazy loading).
+   *
+   * callback_data: "my_card_{index}_{total}" (regex match)
+   *
+   * Usa getCardEntries() per la lista leggera (solo tokenId + stato listing),
+   * poi enrichCardEntry() per arricchire SOLO la carta da visualizzare.
+   * Questo riduce le chiamate RPC da ~24 sequenziali a ~4 parallele.
+   *
+   * Uses getCardEntries() for a lightweight list (just tokenId + listing status),
+   * then enrichCardEntry() to enrich ONLY the card being displayed.
+   * This reduces RPC calls from ~24 sequential to ~4 parallel.
+   */
+  bot.callbackQuery(/^my_card_\d+_\d+$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const match = ctx.callbackQuery.data.match(/^my_card_(\d+)_(\d+)$/);
+    if (!match) return;
+    const targetIndex = parseInt(match[1]);
+
+    const walletAddress = await getUserWalletAddress(userId);
+    if (!walletAddress) return;
+
+    try {
+      // Fase 1: Lista leggera di tutte le carte (parallela, veloce)
+      // Phase 1: Lightweight list of all cards (parallel, fast)
+      const entries = await getCardEntries(walletAddress);
+
+      if (entries.length === 0 || targetIndex >= entries.length) {
+        try {
+          await ctx.editMessageCaption({
+            caption: "📭 No cards found.",
+            reply_markup: new InlineKeyboard()
+              .text("🎨 Create Card", "action_create_card")
+              .text("🏠 Menu", "main_menu")
+          });
+        } catch {
+          await ctx.editMessageText("📭 No cards found.", {
+            reply_markup: new InlineKeyboard()
+              .text("🎨 Create Card", "action_create_card")
+              .text("🏠 Menu", "main_menu")
+          });
+        }
+        return;
+      }
+
+      // Fase 2: Arricchisci SOLO la carta target (stats + metadata in parallelo)
+      // Phase 2: Enrich ONLY the target card (stats + metadata in parallel)
+      const card = await enrichCardEntry(entries[targetIndex]);
+      const { caption, keyboard } = buildMyCardView(card, targetIndex, entries.length);
+
+      if (card.imageUrl) {
+        try {
+          const media = InputMediaBuilder.photo(card.imageUrl, {
+            caption,
+            parse_mode: "Markdown"
+          });
+          await ctx.editMessageMedia(media, { reply_markup: keyboard });
+          return;
+        } catch (imgError) {
+          // "not modified" = contenuto identico, ignora silenziosamente
+          // "not modified" = identical content, silently ignore
+          if (imgError instanceof GrammyError && imgError.description.includes("not modified")) return;
+          console.error("My card editMedia failed:", imgError);
+        }
+      }
+
+      try {
+        await ctx.editMessageCaption({
+          caption: caption + "\n\n📷 _(Image unavailable)_",
+          parse_mode: "Markdown",
+          reply_markup: keyboard
+        });
+      } catch (capErr) {
+        if (capErr instanceof GrammyError && capErr.description.includes("not modified")) return;
+        try {
+          await ctx.editMessageText(caption + "\n\n📷 _(Image unavailable)_", {
+            parse_mode: "Markdown",
+            reply_markup: keyboard
+          });
+        } catch {}
+      }
+    } catch (error) {
+      console.error("My card navigation error:", error);
+      try {
+        await ctx.editMessageCaption({
+          caption: "❌ Error loading card.",
+          reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu")
+        });
+      } catch {
+        await ctx.editMessageText("❌ Error loading card.", {
+          reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu")
+        });
+      }
+    }
+  });
+
+  /**
+   * Mostra la griglia compatta di tutte le carte per selezione diretta.
+   * Shows compact grid of all cards for direct selection (jump-to-card).
+   *
+   * callback_data: "my_cards_grid_{page}" (regex match)
+   * Recupera la lista leggera + nomi delle carte per mostrare la griglia.
+   * Fetches lightweight list + card names to display the grid.
+   */
+  bot.callbackQuery(/^my_cards_grid_\d+$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const match = ctx.callbackQuery.data.match(/^my_cards_grid_(\d+)$/);
+    if (!match) return;
+    const page = parseInt(match[1]);
+
+    const walletAddress = await getUserWalletAddress(userId);
+    if (!walletAddress) return;
+
+    try {
+      const entries = await getCardEntries(walletAddress);
+      if (entries.length === 0) {
+        try {
+          await ctx.editMessageCaption({
+            caption: "📭 No cards found.",
+            reply_markup: new InlineKeyboard()
+              .text("🎨 Create Card", "action_create_card")
+              .text("🏠 Menu", "main_menu")
+          });
+        } catch {
+          await ctx.editMessageText("📭 No cards found.", {
+            reply_markup: new InlineKeyboard()
+              .text("🎨 Create Card", "action_create_card")
+              .text("🏠 Menu", "main_menu")
+          });
+        }
+        return;
+      }
+
+      // Recupera i nomi delle carte nella pagina corrente (parallelo, veloce)
+      // Fetch card names for the current page (parallel, fast)
+      const perPage = 10;
+      const start = page * perPage;
+      const pageEntries = entries.slice(start, start + perPage);
+      const names = new Map<number, string>();
+
+      if (customCardsContract) {
+        const nameResults = await Promise.all(
+          pageEntries.map(async (entry) => {
+            try {
+              const tokenURI = await customCardsContract!.tokenURI(entry.tokenId);
+              const metadata = await fetchNFTMetadata(tokenURI);
+              return { tokenId: entry.tokenId, name: metadata?.name || null };
+            } catch { return { tokenId: entry.tokenId, name: null }; }
+          })
+        );
+        for (const r of nameResults) {
+          if (r.name) names.set(r.tokenId, r.name);
+        }
+      }
+
+      const { caption, keyboard } = buildMyCardsGrid(entries, names, page);
+
+      try {
+        await ctx.editMessageCaption({
+          caption,
+          parse_mode: "Markdown",
+          reply_markup: keyboard
+        });
+      } catch {
+        try { await ctx.deleteMessage(); } catch {}
+        await ctx.reply(caption, {
+          parse_mode: "Markdown",
+          reply_markup: keyboard
+        });
+      }
+    } catch (error) {
+      console.error("Grid view error:", error);
+    }
+  });
+
+  /**
+   * Salta direttamente a una carta dalla griglia.
+   * Jumps directly to a card from the grid view.
+   *
+   * callback_data: "grid_card_{index}_{total}" (regex match)
+   * Stesso flusso di my_card_ ma cancella il messaggio griglia e invia nuovo.
+   * Same flow as my_card_ but deletes grid message and sends new.
+   */
+  bot.callbackQuery(/^grid_card_\d+_\d+$/, async (ctx) => {
+    await ctx.answerCallbackQuery();
+
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    const match = ctx.callbackQuery.data.match(/^grid_card_(\d+)_(\d+)$/);
+    if (!match) return;
+    const targetIndex = parseInt(match[1]);
+
+    const walletAddress = await getUserWalletAddress(userId);
+    if (!walletAddress) return;
+
+    try {
+      const entries = await getCardEntries(walletAddress);
+      if (entries.length === 0 || targetIndex >= entries.length) return;
+
+      const card = await enrichCardEntry(entries[targetIndex]);
+
+      // La griglia e' un messaggio di testo, quindi cancelliamo e inviamo foto
+      // The grid is a text message, so delete it and send a photo
+      try { await ctx.deleteMessage(); } catch {}
+
+      const { showMyCardAt } = await import("./actions.js");
+      await showMyCardAt(ctx, card, targetIndex, entries.length);
+    } catch (error) {
+      console.error("Grid card jump error:", error);
+      try { await ctx.deleteMessage(); } catch {}
+      await ctx.reply("❌ Error loading card.", {
+        reply_markup: new InlineKeyboard().text("🏠 Menu", "main_menu")
+      });
+    }
   });
 
   /**
@@ -581,6 +854,35 @@ ${typeEmoji} *Type:* ${type}
   // ===========================================================================
 
   /**
+   * Attiva/disattiva le notifiche promozionali periodiche.
+   * Toggles periodic promotional notifications on/off.
+   *
+   * callback_data: "toggle_notifications"
+   */
+  bot.callbackQuery("toggle_notifications", async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) {
+      await ctx.answerCallbackQuery();
+      return;
+    }
+
+    const session = sessionStore.get(userId);
+    if (session) {
+      session.notificationsEnabled = !session.notificationsEnabled;
+      sessionStore.save(session);
+      await ctx.answerCallbackQuery(
+        session.notificationsEnabled
+          ? "🔔 Notifications enabled"
+          : "🔕 Notifications disabled"
+      );
+    } else {
+      await ctx.answerCallbackQuery();
+    }
+
+    try { await ctx.deleteMessage(); } catch {}
+  });
+
+  /**
    * Cancella il messaggio corrente (usato per i messaggi sensibili).
    * Deletes the current message (used for sensitive messages).
    *
@@ -595,6 +897,20 @@ ${typeEmoji} *Type:* ${type}
     try {
       await ctx.deleteMessage();
     } catch (error) {}
+  });
+
+  /**
+   * Handler "no-op" per bottoni informativi (es. contatore pagine "1/3").
+   * No-op handler for informational buttons (e.g. page counter "1/3").
+   *
+   * callback_data: "noop"
+   * Non fa nulla, ma deve rispondere alla callback per evitare
+   * l'icona di caricamento infinita su Telegram.
+   * Does nothing, but must answer the callback to avoid
+   * the infinite loading icon on Telegram.
+   */
+  bot.callbackQuery("noop", async (ctx) => {
+    await ctx.answerCallbackQuery();
   });
 
 }

@@ -212,11 +212,19 @@ export const MARKETPLACE_ABI = [
   "function listNFT(address nftContract, uint256 tokenId, uint256 price) returns (uint256)",
 
   // Acquista una carta listata. "payable" perche' bisogna inviare il prezzo in ETH.
-  // expectedPrice previene il front-running (se il prezzo cambia, la tx fallisce).
+  // Il prezzo viene inviato come msg.value nella transazione.
   //
   // Buys a listed card. "payable" because the price must be sent in ETH.
-  // expectedPrice prevents front-running (if price changes, the tx fails).
-  "function buyNFT(uint256 listingId, uint256 expectedPrice) payable",
+  // The price is sent as msg.value in the transaction.
+  //
+  // NOTA: Il contratto deployato usa buyNFT(uint256) con un solo parametro (listingId).
+  // Il codice sorgente Solidity ha buyNFT(uint256,uint256) con expectedPrice, ma questa
+  // versione NON e' deployata. L'ABI deve corrispondere al contratto REALE.
+  //
+  // NOTE: The deployed contract uses buyNFT(uint256) with a single parameter (listingId).
+  // The Solidity source has buyNFT(uint256,uint256) with expectedPrice, but that version
+  // is NOT deployed. The ABI must match the ACTUAL deployed contract.
+  "function buyNFT(uint256 listingId) payable",
 
   // Cancella un listing attivo (solo il venditore puo' farlo)
   // Cancels an active listing (only the seller can do this)

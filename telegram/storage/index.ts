@@ -172,6 +172,10 @@ export class SessionStore {
    * @returns La sessione utente corrispondente, o null se non trovata /
    *          The matching user session, or null if not found
    */
+  getAll(): UserSession[] {
+    return Array.from(this.sessions.values());
+  }
+
   findByWalletAddress(address: string): UserSession | null {
     const lowerAddress = address.toLowerCase();
     for (const session of this.sessions.values()) {

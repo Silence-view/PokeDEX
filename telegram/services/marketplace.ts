@@ -440,32 +440,47 @@ export async function buyNFTOnChain(listingId: number, price: bigint, userId?: n
     // (sending transactions), not just reading.
     const marketplace = new ethers.Contract(CONTRACTS.MARKETPLACE, MARKETPLACE_ABI, activeSigner);
 
-    // buyNFT(listingId, price) con { value: price } invia ETH insieme alla chiamata.
-    // Il contratto marketplace riceverà sia la chiamata di funzione che il pagamento.
+    // buyNFT(listingId) con { value: price } invia ETH insieme alla chiamata.
+    // Il contratto deployato prende solo listingId — il prezzo viene inviato come msg.value.
     //
-    // buyNFT(listingId, price) with { value: price } sends ETH along with the call.
-    // The marketplace contract will receive both the function call and the payment.
-    const tx = await marketplace.buyNFT(listingId, price, { value: price });
+    // buyNFT(listingId) with { value: price } sends ETH along with the call.
+    // The deployed contract takes only listingId — price is sent as msg.value.
+    const tx = await marketplace.buyNFT(listingId, { value: price });
     console.log(`Transaction sent: ${tx.hash}`);
 
-    // Attende che la transazione venga confermata (inclusa in un blocco minato)
-    // Waits for the transaction to be confirmed (included in a mined block)
-    const receipt = await tx.wait();
-    console.log(`Transaction confirmed in block ${receipt.blockNumber}`);
+    // Attende conferma con timeout di 120s per evitare hang su Sepolia
+    // Waits for confirmation with 120s timeout to avoid hanging on Sepolia
+    const receipt = await tx.wait(1, 120_000);
+    console.log(`Transaction confirmed in block ${receipt?.blockNumber}`);
 
     return { success: true, txHash: tx.hash };
   } catch (error: any) {
     console.error("Buy error:", error);
-    // Restituiamo il messaggio più informativo disponibile:
-    // - error.reason: messaggio dal contratto Solidity (es. "Listing not active")
-    // - error.message: messaggio generico dall'errore JavaScript
-    //
-    // We return the most informative message available:
-    // - error.reason: message from the Solidity contract (e.g. "Listing not active")
-    // - error.message: generic message from the JavaScript error
+
+    // Messaggi di errore chiari per ogni tipo di fallimento
+    // Clear error messages for each type of failure
+    if (error.code === "CALL_EXCEPTION") {
+      const reason = error.reason || error.revert?.args?.[0];
+      if (reason) {
+        return { success: false, error: `Contract rejected: ${reason}` };
+      }
+      return {
+        success: false,
+        error: "The contract rejected this transaction. The listing may no longer be active, or the price may have changed."
+      };
+    }
+    if (error.code === "TIMEOUT") {
+      return {
+        success: false,
+        error: `Transaction sent but not confirmed within 2 minutes. Check the block explorer for TX: ${error.transaction?.hash || "unknown"}`
+      };
+    }
+    if (error.code === "INSUFFICIENT_FUNDS") {
+      return { success: false, error: "Insufficient ETH balance (including gas fees)." };
+    }
     return {
       success: false,
-      error: error.reason || error.message || "Transaction failed"
+      error: error.reason || error.shortMessage || "Transaction failed. Please try again."
     };
   }
 }

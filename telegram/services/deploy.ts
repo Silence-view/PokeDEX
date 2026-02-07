@@ -241,8 +241,8 @@ export async function deployCardOnChain(draft: CardDraft): Promise<DeployResult>
     // confirmed block. This can take from a few seconds to several minutes
     // depending on network congestion and the gas price set.
     // =========================================================================
-    const receipt = await tx.wait();
-    console.log(`Transaction confirmed in block ${receipt.blockNumber}`);
+    const receipt = await tx.wait(1, 120_000);
+    console.log(`Transaction confirmed in block ${receipt?.blockNumber}`);
 
     // =========================================================================
     // FASE 5: PARSING DEL TOKEN ID DAI LOG DELLA TRANSAZIONE

@@ -21,7 +21,7 @@
 
 import { sessionStore } from "../storage/index.js";
 import { NETWORK } from "../config.js";
-import { getMainMenuKeyboard } from "../bot/menu.js";
+import { getMainMenuKeyboard, getWelcomeMessage } from "../bot/menu.js";
 import { SECURITY_NOTICE, ANTI_PHISHING_WARNING } from "../bot/security.js";
 import { bot } from "../bot/setup.js";
 import {
@@ -87,22 +87,10 @@ export function registerCommandHandlers() {
       sessionStore.getOrCreate(userId, username, firstName);
     }
 
-    await ctx.reply(
-      `🎮 *Welcome to PokeDEX NFT!*
-
-Create Pokemon cards as NFTs and sell them on the marketplace!
-
-*Features:*
-• 🎨 Create cards with royalties
-• 🛒 Buy/sell cards on the marketplace
-• 👛 Built-in wallet management
-
-*Network:* ${NETWORK.name} Testnet
-*Contracts:* Verified on Etherscan
-
-🔒 *Security:* We never ask for private keys!`,
-      { parse_mode: "Markdown", reply_markup: getMainMenuKeyboard() }
-    );
+    await ctx.reply(getWelcomeMessage(firstName), {
+      parse_mode: "Markdown",
+      reply_markup: getMainMenuKeyboard(),
+    });
   });
 
   /**

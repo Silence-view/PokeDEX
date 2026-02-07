@@ -57,6 +57,7 @@ export function registerMarketplaceCallbacks() {
    */
   bot.callbackQuery(/^browse_market_\d+$/, async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     const match = ctx.callbackQuery.data.match(/^browse_market_(\d+)$/);
     if (!match) return;
     const page = parseInt(match[1]);
@@ -81,14 +82,18 @@ export function registerMarketplaceCallbacks() {
    */
   bot.callbackQuery(/^buy_listing_\d+$/, async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
 
     const userId = ctx.from?.id;
     if (!userId) return;
+
+    const loadingMsg = await ctx.reply("🔄 Loading listing details...");
 
     // Verifica wallet e saldo dell'utente
     // Verify user's wallet and balance
     const walletInfo = await getUserWalletWithBalance(userId);
     if (!walletInfo) {
+      try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
       await ctx.reply("❌ Create your wallet first!", {
         reply_markup: new InlineKeyboard().text("👛 Create Wallet", "wallet_create")
       });
@@ -105,6 +110,8 @@ export function registerMarketplaceCallbacks() {
     // Recupera i dettagli arricchiti del listing (nome, prezzo, seller, ecc.)
     // Retrieve enriched listing details (name, price, seller, etc.)
     const listing = await getEnrichedListing(listingId);
+    try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
+
     if (!listing || !listing.active) {
       await ctx.reply("❌ Listing no longer available.");
       return;
@@ -167,55 +174,84 @@ ${hasEnoughBalance ? "The NFT will be transferred directly to your wallet!" : "�
 
     const listingId = parseInt(match[1]);
 
-    // Ricontrolla che il listing sia ancora disponibile (potrebbe essere stato
-    // comprato da un altro utente nel frattempo)
-    // Re-check that the listing is still available (it may have been bought
-    // by another user in the meantime)
-    const listing = await getEnrichedListing(listingId);
-    if (!listing || !listing.active) {
-      await ctx.editMessageText("❌ Listing no longer available.");
-      return;
-    }
+    try {
+      // Ricontrolla che il listing sia ancora disponibile (potrebbe essere stato
+      // comprato da un altro utente nel frattempo)
+      // Re-check that the listing is still available (it may have been bought
+      // by another user in the meantime)
+      const listing = await getEnrichedListing(listingId);
+      if (!listing || !listing.active) {
+        await ctx.editMessageText("❌ Listing no longer available.", {
+          reply_markup: new InlineKeyboard()
+            .text("🛍️ Browse", "browse_market_0")
+            .text("🏠 Menu", "main_menu")
+        });
+        return;
+      }
 
-    // Mostra messaggio di attesa durante la transazione
-    // Show waiting message during the transaction
-    await ctx.editMessageText("🔄 *Purchase in progress...*\n\nPlease wait while the transaction is being processed.", { parse_mode: "Markdown" });
+      // Doppio controllo: impedisci acquisto della propria carta (defense-in-depth)
+      // Double check: prevent buying own card (defense-in-depth)
+      if (userId) {
+        const buyerAddress = await getUserWalletAddress(userId);
+        if (buyerAddress && listing.seller.toLowerCase() === buyerAddress.toLowerCase()) {
+          await ctx.editMessageText("❌ You cannot buy your own listing!", {
+            reply_markup: new InlineKeyboard()
+              .text("🛍️ Browse", "browse_market_0")
+              .text("🏠 Menu", "main_menu")
+          });
+          return;
+        }
+      }
 
-    // Esegui l'acquisto on-chain (firma tx, invia, attendi conferma)
-    // Execute the on-chain purchase (sign tx, send, await confirmation)
-    const result = await buyNFTOnChain(listingId, listing.price, userId);
+      // Mostra messaggio di attesa durante la transazione
+      // Show waiting message during the transaction
+      await ctx.editMessageText("🔄 *Purchase in progress...*\n\nPlease wait while the transaction is being processed.", { parse_mode: "Markdown" });
 
-    if (result.success) {
-      const successKeyboard = new InlineKeyboard()
-        .url("🔍 View Transaction", `${NETWORK.explorer}/tx/${result.txHash}`)
-        .row()
-        .text("🛍️ Continue Shopping", "browse_market_0")
-        .text("🏠 Menu", "main_menu");
+      // Esegui l'acquisto on-chain (firma tx, invia, attendi conferma)
+      // Execute the on-chain purchase (sign tx, send, await confirmation)
+      const result = await buyNFTOnChain(listingId, listing.price, userId);
 
-      await ctx.editMessageText(
-        `✅ *Purchase Complete!*
+      if (result.success) {
+        const successKeyboard = new InlineKeyboard()
+          .url("🔍 View Transaction", `${NETWORK.explorer}/tx/${result.txHash}`)
+          .row()
+          .text("🛍️ Continue Shopping", "browse_market_0")
+          .text("🏠 Menu", "main_menu");
+
+        await ctx.editMessageText(
+          `✅ *Purchase Complete!*
 
 🎴 *Card:* ${listing.name || `#${listing.tokenId}`}
 💰 *Price:* ${ethers.formatEther(listing.price)} ETH
 📜 *TX:* \`${result.txHash?.slice(0, 20)}...\`
 
 The NFT is now in your wallet!`,
-        { parse_mode: "Markdown", reply_markup: successKeyboard }
-      );
-    } else {
-      await ctx.editMessageText(
-        `❌ *Purchase Failed*
-
-${result.error}
-
-Try again or contact support.`,
-        {
-          parse_mode: "Markdown",
-          reply_markup: new InlineKeyboard()
-            .text("🔄 Retry", `buy_listing_${listingId}`)
-            .text("🏠 Menu", "main_menu")
-        }
-      );
+          { parse_mode: "Markdown", reply_markup: successKeyboard }
+        );
+      } else {
+        await ctx.editMessageText(
+          `❌ *Purchase Failed*\n\n${result.error}`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: new InlineKeyboard()
+              .text("🔄 Retry", `buy_listing_${listingId}`)
+              .text("🏠 Menu", "main_menu")
+          }
+        );
+      }
+    } catch (error: any) {
+      console.error("Purchase handler error:", error);
+      try {
+        await ctx.editMessageText(
+          `❌ *Purchase Failed*\n\nAn unexpected error occurred. Please try again.`,
+          {
+            parse_mode: "Markdown",
+            reply_markup: new InlineKeyboard()
+              .text("🔄 Retry", `buy_listing_${listingId}`)
+              .text("🏠 Menu", "main_menu")
+          }
+        );
+      } catch {}
     }
   });
 
@@ -274,7 +310,7 @@ Try again or contact support.`,
    *    Uses editMessageMedia() to swap image and caption in-place
    */
   bot.callbackQuery(/^my_listing_\d+$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
+    await ctx.answerCallbackQuery("🔄 Loading...");
 
     const userId = ctx.from?.id;
     if (!userId) return;
@@ -439,7 +475,7 @@ Try again or contact support.`,
 
       const marketplace = new ethers.Contract(CONTRACTS.MARKETPLACE, MARKETPLACE_ABI, activeSigner);
       const tx = await marketplace.cancelListing(listingId);
-      await tx.wait();
+      await tx.wait(1, 120_000);
 
       await ctx.editMessageCaption({
         caption: `✅ *Listing #${listingId} Cancelled!*\n\nYour NFT has been returned to your wallet.`,
@@ -490,6 +526,7 @@ Try again or contact support.`,
    */
   bot.callbackQuery(/^sell_card_\d+$/, async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
 
     const match = ctx.callbackQuery.data.match(/^sell_card_(\d+)$/);
     if (!match) return;

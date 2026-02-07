@@ -46,6 +46,8 @@ import { sessionStore, draftStore } from "../storage/index.js";
 import { getUserWalletAddress } from "../services/wallet-helpers.js";
 import { getEnrichedListing, getActiveListings } from "../services/marketplace.js";
 import { fetchNFTMetadata } from "../services/ipfs.js";
+import { getEthPriceUSD } from "../services/eth-price.js";
+import { getWalletStats } from "../services/wallet-stats.js";
 import { formatAddress, getEtherscanLink, formatTimeAgo } from "../bot/helpers.js";
 import { getMainMenuKeyboard } from "../bot/menu.js";
 import { SECURITY_NOTICE, ANTI_PHISHING_WARNING } from "../bot/security.js";
@@ -100,8 +102,23 @@ export async function showHelp(ctx: MyContext) {
 /security - Security info
 /contracts - Contract addresses
 
+*Getting Started:*
+⛽ Get free test ETH from the faucet
+🎨 Create your first card
+🛒 Browse and buy from the marketplace
+
 *Rarity:* ⚪Common | 🟢Uncommon | 🔵Rare | 🟣Ultra | 🟡Legendary`,
-    { parse_mode: "Markdown", reply_markup: getMainMenuKeyboard() }
+    {
+      parse_mode: "Markdown",
+      reply_markup: new InlineKeyboard()
+        .text("⛽ Get Test ETH", "wallet_faucet_info")
+        .text("👛 Wallet", "action_wallet")
+        .row()
+        .text("🎨 Create Card", "action_create_card")
+        .text("🛒 Marketplace", "action_marketplace")
+        .row()
+        .text("🏠 Menu", "main_menu")
+    }
   );
 }
 
@@ -149,8 +166,6 @@ export async function showMyCards(ctx: MyContext) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
-  // Recupera l'indirizzo wallet associato all'utente Telegram
-  // Retrieve the wallet address associated with the Telegram user
   const walletAddress = await getUserWalletAddress(userId);
   if (!walletAddress) {
     await ctx.reply("❌ Create your wallet first!", {
@@ -159,72 +174,343 @@ export async function showMyCards(ctx: MyContext) {
     return;
   }
 
+  const loadingMsg = await ctx.reply("🔄 Loading your collection...");
+
   try {
-    // Interroga la blockchain per ottenere gli ID delle carte possedute
-    // Query the blockchain to get the IDs of owned cards
-    const cardIds = customCardsContract
-      ? await customCardsContract.tokensOfOwner(walletAddress).catch((e: any) => {
-          console.error("Error fetching cards:", e.message);
-          return [];
+    // FASE 1: Recupera tokenIds + listing status in PARALLELO (2 RPC calls)
+    // PHASE 1: Fetch tokenIds + listing status in PARALLEL (2 RPC calls)
+    const [ownedIds, listingIds] = await Promise.all([
+      customCardsContract
+        ? customCardsContract.tokensOfOwner(walletAddress).catch(() => [])
+        : Promise.resolve([]),
+      marketplaceContract
+        ? marketplaceContract.getSellerListings(walletAddress).catch(() => [])
+        : Promise.resolve([]),
+    ]);
+
+    // FASE 2: Check listing attivi in PARALLELO (batch getListing)
+    // PHASE 2: Check active listings in PARALLEL (batch getListing)
+    const listedCards: { tokenId: number; listingId: number; price: bigint }[] = [];
+    if (marketplaceContract && listingIds.length > 0) {
+      const recentIds = [...listingIds].slice(-20).reverse();
+      const listingResults = await Promise.all(
+        recentIds.map(async (lid) => {
+          try {
+            const listing = await marketplaceContract!.getListing(Number(lid));
+            if (listing.active && listing.seller && listing.seller !== ethers.ZeroAddress) {
+              return { tokenId: Number(listing.tokenId), listingId: Number(lid), price: listing.price };
+            }
+          } catch {}
+          return null;
         })
-      : [];
+      );
+      for (const r of listingResults) {
+        if (r) listedCards.push(r);
+      }
+    }
 
-    const totalCards = cardIds.length;
+    // FASE 3: Costruisci lista DEDUPLICATA (ZERO RPC calls)
+    // Il marketplace usa approval-based listing: le carte listate restano nel wallet,
+    // quindi tokensOfOwner() le ritorna ancora. Usiamo una Map per deduplicare.
+    // PHASE 3: Build DEDUPLICATED list (ZERO RPC calls)
+    // The marketplace uses approval-based listing: listed cards stay in the wallet,
+    // so tokensOfOwner() still returns them. We use a Map to deduplicate.
+    const cardMap = new Map<number, CardEntry>();
+    for (const tokenId of ownedIds) {
+      cardMap.set(Number(tokenId), { tokenId: Number(tokenId), isListed: false });
+    }
+    for (const listed of listedCards) {
+      const existing = cardMap.get(listed.tokenId);
+      if (existing) {
+        existing.isListed = true;
+        existing.listingId = listed.listingId;
+        existing.listingPrice = listed.price;
+      } else {
+        cardMap.set(listed.tokenId, {
+          tokenId: listed.tokenId,
+          isListed: true,
+          listingId: listed.listingId,
+          listingPrice: listed.price,
+        });
+      }
+    }
+    const allCardEntries = Array.from(cardMap.values());
 
-    // Se l'utente non ha carte, suggerisci di crearne una
-    // If the user has no cards, suggest creating one
-    if (totalCards === 0) {
+    if (allCardEntries.length === 0) {
+      try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
       await ctx.reply("📭 You don't have any cards yet!\n\nCreate your first card!", {
         reply_markup: new InlineKeyboard()
           .text("🎨 Create Card", "action_create_card")
+          .text("🏠 Menu", "main_menu")
       });
       return;
     }
 
-    let message = `🎴 <b>Your Collection</b>\n\n`;
-    message += `You have <b>${totalCards}</b> card(s):\n\n`;
+    // FASE 4: Arricchisci SOLO la carta #0 (stats + metadata in parallelo)
+    // PHASE 4: Enrich ONLY card #0 (stats + metadata in parallel)
+    const enriched = await enrichCardEntry(allCardEntries[0]);
 
-    // Costruisci la tastiera inline con un bottone per ogni carta
-    // Build the inline keyboard with a button for each card
-    const keyboard = new InlineKeyboard();
-    let cardsShown = 0;
-    const maxCards = 10;
+    try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
 
-    if (cardIds.length > 0 && customCardsContract) {
-      message += `<b>🎨 Cards:</b>\n`;
-      for (const tokenId of cardIds.slice(0, maxCards)) {
-        if (cardsShown >= maxCards) break;
-        try {
-          // Recupera le statistiche on-chain della carta (rarita', verificata, etc.)
-          // Fetch the card's on-chain stats (rarity, verified, etc.)
-          const stats = await customCardsContract.getCardStats(tokenId);
-          const verified = stats.verified ? "✅" : "⏳";
-          const rarityNames = ["Common", "Uncommon", "Rare", "Ultra Rare", "Legendary"];
-          const rarity = rarityNames[stats.rarity] || "Unknown";
-          message += `• Card #${tokenId} - ${rarity} ${verified}\n`;
-          keyboard.text(`🎨 #${tokenId}`, `view_card_${tokenId}`).row();
-        } catch {
-          message += `• Card #${tokenId}\n`;
-          keyboard.text(`🎨 #${tokenId}`, `view_card_${tokenId}`).row();
-        }
-        cardsShown++;
-      }
-    }
-
-    // Indica se ci sono altre carte oltre il limite mostrato
-    // Indicate if there are more cards beyond the displayed limit
-    if (totalCards > maxCards) {
-      message += `\n... and ${totalCards - maxCards} more`;
-    }
-
-    await ctx.reply(message, {
-      parse_mode: "HTML",
-      reply_markup: keyboard
-    });
+    await showMyCardAt(ctx, enriched, 0, allCardEntries.length);
   } catch (error) {
     console.error("Error fetching cards:", error);
+    try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
     await ctx.reply("❌ Error loading your cards. Please try again.");
   }
+}
+
+/**
+ * Struttura leggera per una carta (senza dati pesanti come stats/metadata).
+ * Lightweight card structure (without heavy data like stats/metadata).
+ */
+export interface CardEntry {
+  tokenId: number;
+  isListed: boolean;
+  listingId?: number;
+  listingPrice?: bigint;
+}
+
+/**
+ * Struttura carta arricchita con stats e metadata (per il display).
+ * Enriched card structure with stats and metadata (for display).
+ */
+export interface EnrichedCardEntry extends CardEntry {
+  name?: string;
+  imageUrl?: string;
+  stats?: import("../types.js").CardStats;
+}
+
+/**
+ * Arricchisce UNA singola carta con stats + metadata in parallelo.
+ * Enriches ONE single card with stats + metadata in parallel.
+ * Solo 2-3 RPC calls per carta (getCardStats + tokenURI in parallelo).
+ * Only 2-3 RPC calls per card (getCardStats + tokenURI in parallel).
+ */
+export async function enrichCardEntry(entry: CardEntry): Promise<EnrichedCardEntry> {
+  const enriched: EnrichedCardEntry = { ...entry };
+  if (!customCardsContract) return enriched;
+
+  try {
+    // Fetch stats e tokenURI in PARALLELO (2 RPC calls simultanee)
+    // Fetch stats and tokenURI in PARALLEL (2 simultaneous RPC calls)
+    const [stats, tokenURI] = await Promise.all([
+      customCardsContract.getCardStats(entry.tokenId).catch(() => null),
+      customCardsContract.tokenURI(entry.tokenId).catch(() => null),
+    ]);
+
+    if (stats) {
+      enriched.stats = {
+        hp: Number(stats.hp),
+        attack: Number(stats.attack),
+        defense: Number(stats.defense),
+        speed: Number(stats.speed),
+        pokemonType: Number(stats.pokemonType || stats.cardType || 0),
+        rarity: Number(stats.rarity),
+        generation: Number(stats.generation || 1),
+        experience: Number(stats.experience || 0),
+      };
+    }
+
+    if (tokenURI) {
+      try {
+        const metadata = await fetchNFTMetadata(tokenURI);
+        if (metadata) {
+          enriched.name = metadata.name;
+          enriched.imageUrl = metadata.image;
+        }
+      } catch {}
+    }
+  } catch {}
+
+  return enriched;
+}
+
+/**
+ * Recupera la lista leggera di carte (tokenIds + listing status) in modo veloce.
+ * Fetches the lightweight card list (tokenIds + listing status) fast.
+ * Solo 2 RPC calls + N listing checks in parallelo.
+ * Only 2 RPC calls + N listing checks in parallel.
+ */
+export async function getCardEntries(walletAddress: string): Promise<CardEntry[]> {
+  const [ownedIds, listingIds] = await Promise.all([
+    customCardsContract
+      ? customCardsContract.tokensOfOwner(walletAddress).catch(() => [])
+      : Promise.resolve([]),
+    marketplaceContract
+      ? marketplaceContract.getSellerListings(walletAddress).catch(() => [])
+      : Promise.resolve([]),
+  ]);
+
+  // Usa Map per deduplicare: il marketplace usa approval-based listing,
+  // quindi tokensOfOwner() ritorna anche le carte listate.
+  // Use Map to deduplicate: the marketplace uses approval-based listing,
+  // so tokensOfOwner() also returns listed cards.
+  const cardMap = new Map<number, CardEntry>();
+
+  for (const tokenId of ownedIds) {
+    cardMap.set(Number(tokenId), { tokenId: Number(tokenId), isListed: false });
+  }
+
+  if (marketplaceContract && listingIds.length > 0) {
+    const recentIds = [...listingIds].slice(-20).reverse();
+    const listingResults = await Promise.all(
+      recentIds.map(async (lid) => {
+        try {
+          const listing = await marketplaceContract!.getListing(Number(lid));
+          if (listing.active && listing.seller && listing.seller !== ethers.ZeroAddress) {
+            return { tokenId: Number(listing.tokenId), listingId: Number(lid), price: listing.price };
+          }
+        } catch {}
+        return null;
+      })
+    );
+    for (const r of listingResults) {
+      if (r) {
+        const existing = cardMap.get(r.tokenId);
+        if (existing) {
+          existing.isListed = true;
+          existing.listingId = r.listingId;
+          existing.listingPrice = r.price;
+        } else {
+          cardMap.set(r.tokenId, { tokenId: r.tokenId, isListed: true, listingId: r.listingId, listingPrice: r.price });
+        }
+      }
+    }
+  }
+
+  return Array.from(cardMap.values());
+}
+
+/**
+ * Costruisce la didascalia e la tastiera per una singola carta nel carousel "My Cards".
+ * Builds the caption and keyboard for a single card in the "My Cards" carousel.
+ */
+export function buildMyCardView(
+  card: EnrichedCardEntry,
+  index: number,
+  total: number
+) {
+  const type = card.stats ? (POKEMON_TYPES[card.stats.pokemonType] || "Unknown") : "Unknown";
+  const typeEmoji = TYPE_EMOJIS[type] || "❓";
+  const rarity = card.stats ? (RARITIES[card.stats.rarity] || RARITIES[0]) : RARITIES[0];
+
+  let caption = `🎴 *${card.name || `Card #${card.tokenId}`}*\n\n`;
+  caption += `${rarity.emoji} *Rarity:* ${rarity.name}\n`;
+  caption += `${typeEmoji} *Type:* ${type}\n\n`;
+  caption += `❤️ HP: ${card.stats?.hp || "?"} | ⚔️ ATK: ${card.stats?.attack || "?"}\n`;
+  caption += `🛡️ DEF: ${card.stats?.defense || "?"} | 💨 SPD: ${card.stats?.speed || "?"}\n\n`;
+
+  if (card.isListed) {
+    const priceEth = card.listingPrice ? ethers.formatEther(card.listingPrice) : "?";
+    caption += `🏷️ *Listed on Marketplace*\n`;
+    caption += `💰 Price: ${priceEth} ETH\n`;
+    caption += `🆔 Listing: #${card.listingId}\n`;
+  } else {
+    caption += `📦 *In your wallet*\n`;
+  }
+
+  caption += `\n🆔 *Token:* #${card.tokenId}`;
+
+  const keyboard = new InlineKeyboard();
+
+  if (total > 1) {
+    const prevIndex = (index - 1 + total) % total;
+    const nextIndex = (index + 1) % total;
+    keyboard
+      .text("📑", `my_cards_grid_0`)
+      .text("« Prev", `my_card_${prevIndex}_${total}`)
+      .text(`${index + 1}/${total}`, "noop")
+      .text("Next »", `my_card_${nextIndex}_${total}`);
+    keyboard.row();
+  }
+
+  if (!card.isListed) {
+    keyboard.text("🛒 Sell", `sell_card_${card.tokenId}`);
+  } else {
+    keyboard.text("❌ Cancel Listing", `cancel_my_listing_${card.listingId}`);
+  }
+  keyboard.row();
+  keyboard.text("🛍️ Marketplace", "browse_market_0").text("🏠 Menu", "main_menu");
+
+  return { caption, keyboard };
+}
+
+/**
+ * Costruisce la griglia compatta per la selezione diretta delle carte.
+ * Builds a compact grid for direct card selection (jump-to-card).
+ *
+ * Mostra fino a 10 carte per pagina con nome e stato listing.
+ * Shows up to 10 cards per page with name and listing status.
+ */
+export function buildMyCardsGrid(
+  entries: CardEntry[],
+  names: Map<number, string>,
+  page: number
+) {
+  const perPage = 10;
+  const totalPages = Math.ceil(entries.length / perPage);
+  const safePage = Math.min(page, totalPages - 1);
+  const start = safePage * perPage;
+  const pageEntries = entries.slice(start, start + perPage);
+
+  let caption = `📑 *Your Collection* (${entries.length} cards)`;
+  if (totalPages > 1) caption += ` — Page ${safePage + 1}/${totalPages}`;
+  caption += `\n\nTap a card to view it:`;
+
+  const keyboard = new InlineKeyboard();
+
+  for (let i = 0; i < pageEntries.length; i++) {
+    const entry = pageEntries[i];
+    const globalIdx = start + i;
+    const name = names.get(entry.tokenId) || `#${entry.tokenId}`;
+    const truncName = name.length > 12 ? name.slice(0, 11) + "…" : name;
+    const prefix = entry.isListed ? "🏷️" : "🎴";
+    keyboard.text(`${prefix} ${truncName}`, `grid_card_${globalIdx}_${entries.length}`);
+    if (i % 2 === 1) keyboard.row();
+  }
+  if (pageEntries.length % 2 === 1) keyboard.row();
+
+  if (totalPages > 1) {
+    if (safePage > 0) keyboard.text("◀ Prev", `my_cards_grid_${safePage - 1}`);
+    if (safePage < totalPages - 1) keyboard.text("Next ▶", `my_cards_grid_${safePage + 1}`);
+    keyboard.row();
+  }
+
+  keyboard.text("🔙 Back", `my_card_0_${entries.length}`).text("🏠 Menu", "main_menu");
+
+  return { caption, keyboard };
+}
+
+/**
+ * Invia una singola carta arricchita come messaggio con foto nel carousel.
+ * Sends a single enriched card as a photo message in the carousel.
+ */
+export async function showMyCardAt(
+  ctx: MyContext,
+  card: EnrichedCardEntry,
+  index: number,
+  total: number
+) {
+  const { caption, keyboard } = buildMyCardView(card, index, total);
+
+  if (card.imageUrl) {
+    try {
+      await ctx.replyWithPhoto(card.imageUrl, {
+        caption,
+        parse_mode: "Markdown",
+        reply_markup: keyboard
+      });
+      return;
+    } catch (imgError) {
+      console.error("My card image send failed:", imgError);
+    }
+  }
+
+  await ctx.reply(caption + "\n\n📷 _(Image unavailable)_", {
+    parse_mode: "Markdown",
+    reply_markup: keyboard
+  });
 }
 
 /**
@@ -266,6 +552,8 @@ export async function showCardDetails(ctx: MyContext, cardId: number) {
     await ctx.reply("❌ CustomCards contract not configured.");
     return;
   }
+
+  const loadingMsg = await ctx.reply("🔄 Loading card details...");
 
   try {
     // Recupera i dati on-chain della carta dallo smart contract
@@ -312,13 +600,13 @@ export async function showCardDetails(ctx: MyContext, cardId: number) {
       caption += `\n👛 Owner: You`;
     }
 
-    // Mostra il bottone "Sell" solo se: l'utente e' il proprietario,
-    // il marketplace e' configurato, e la carta non e' bannata
-    // Show the "Sell" button only if: the user is the owner,
-    // the marketplace is configured, and the card is not banned
-    const keyboard = isOwner && CONTRACTS.MARKETPLACE && !isBanned
-      ? new InlineKeyboard().text("🛒 Sell", `sell_card_${cardId}`)
-      : undefined;
+    // Costruisci la tastiera con "Sell" (se applicabile) e navigazione
+    // Build the keyboard with "Sell" (if applicable) and navigation
+    const keyboard = new InlineKeyboard();
+    if (isOwner && CONTRACTS.MARKETPLACE && !isBanned) {
+      keyboard.text("🛒 Sell", `sell_card_${cardId}`).row();
+    }
+    keyboard.text("🎴 My Cards", "action_my_cards").text("🏠 Menu", "main_menu");
 
     // Prova a recuperare l'immagine della carta dai metadati IPFS
     // Try to fetch the card image from IPFS metadata
@@ -331,6 +619,12 @@ export async function showCardDetails(ctx: MyContext, cardId: number) {
       // fetchNFTMetadata downloads the JSON and extracts the "image" field
       const metadata = await fetchNFTMetadata(tokenURI);
       imageUrl = metadata?.image;
+    } catch {}
+
+    // Cancella il messaggio di caricamento
+    // Delete the loading message
+    try {
+      await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
     } catch {}
 
     // Se abbiamo un'immagine, inviala come foto con didascalia
@@ -354,6 +648,9 @@ export async function showCardDetails(ctx: MyContext, cardId: number) {
     });
   } catch (error) {
     console.error("Error showing card:", error);
+    try {
+      await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+    } catch {}
     await ctx.reply("❌ Card not found.");
   }
 }
@@ -394,10 +691,16 @@ export async function showMyCreations(ctx: MyContext) {
     return;
   }
 
+  const loadingMsg = await ctx.reply("🔄 Loading your creations...");
+
   try {
     // Recupera tutti gli ID di carte create da questo wallet
     // Fetch all card IDs created by this wallet
     const cardIds = await customCardsContract.getCreatorCards(walletAddress);
+
+    try {
+      await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+    } catch {}
 
     if (cardIds.length === 0) {
       await ctx.reply("📭 You haven't created any cards yet!\n\nCreate your first card!", {
@@ -436,6 +739,9 @@ export async function showMyCreations(ctx: MyContext) {
     await ctx.reply(message, { parse_mode: "Markdown", reply_markup: keyboard });
   } catch (error) {
     console.error("Error fetching creations:", error);
+    try {
+      await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id);
+    } catch {}
     await ctx.reply("❌ Error fetching creations.");
   }
 }
@@ -480,7 +786,12 @@ export async function showMyDrafts(ctx: MyContext) {
     message += `• *${draft.cardName || "Unnamed"}* - ${status}\n`;
   }
 
-  await ctx.reply(message, { parse_mode: "Markdown" });
+  await ctx.reply(message, {
+    parse_mode: "Markdown",
+    reply_markup: new InlineKeyboard()
+      .text("🎨 Create Card", "action_create_card")
+      .text("🏠 Menu", "main_menu")
+  });
 }
 
 // =============================================================================
@@ -955,65 +1266,25 @@ export async function showMyListingAt(
  * Note: uses sendSensitiveMessage() for sensitive data (balances) - the message
  * will be auto-deleted after a certain time to protect privacy.
  */
-export async function showWallet(ctx: MyContext) {
+export async function showWallet(ctx: MyContext, viewWalletId?: string, editMessage?: boolean) {
   const userId = ctx.from?.id;
   if (!userId) return;
 
+  // Mostra caricamento solo per nuovi messaggi (non per editMessage)
+  // Show loading only for new messages (not for editMessage)
+  let loadingMsg: any = null;
+  if (!editMessage) {
+    loadingMsg = await ctx.reply("🔄 Loading wallet...");
+  }
+
   try {
-    // Recupera il gestore wallet e la lista dei wallet dell'utente
-    // Get the wallet manager and the user's wallet list
     const walletManager = getWalletManager();
     const wallets = await walletManager.listWallets(userId);
 
-    if (wallets.length > 0) {
-      // Trova il wallet attivo (usato per tutte le transazioni)
-      // Find the active wallet (used for all transactions)
-      const activeWallet = wallets.find(w => w.isActive) || wallets[0];
-
-      // Aggiorna la sessione locale con l'indirizzo del wallet attivo
-      // Update the local session with the active wallet address
-      const session = sessionStore.getOrCreate(userId, ctx.from?.username, ctx.from?.first_name);
-      session.walletAddress = activeWallet.address;
-      sessionStore.save(session);
-
-      // Costruisci la lista dei wallet con saldi
-      // Build the wallet list with balances
-      let walletList = "";
-      for (const w of wallets) {
-        const activeIcon = w.isActive ? "✅ " : "   ";
-        walletList += `${activeIcon}<b>${w.name}</b>\n   <code>${w.address.slice(0,10)}...${w.address.slice(-6)}</code>\n   💰 ${w.balanceFormatted} ETH\n\n`;
+    if (wallets.length === 0) {
+      if (loadingMsg) {
+        try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
       }
-
-      // Tastiera con tutte le azioni wallet disponibili
-      // Keyboard with all available wallet actions
-      const keyboard = new InlineKeyboard()
-        .text("💰 Deposit", "wallet_deposit")
-        .text("📤 Withdraw", "wallet_withdraw")
-        .row()
-        .text("🔑 Private Key", "wallet_export_key")
-        .text("🌱 Seed Phrase", "wallet_export_mnemonic")
-        .row()
-        .text("➕ New Wallet", "wallet_create_new")
-        .text("🔄 Switch Wallet", "wallet_switch")
-        .row()
-        .url("📊 Etherscan", getEtherscanLink("address", activeWallet.address));
-
-      // Usa sendSensitiveMessage per auto-cancellare dopo un timeout (sicurezza)
-      // Use sendSensitiveMessage to auto-delete after a timeout (security)
-      await sendSensitiveMessage(
-        bot,
-        ctx.chat!.id,
-        `👛 <b>Your Wallets</b> (${wallets.length})
-
-${walletList}🦊 <b>MetaMask Compatible</b> - Export seed phrase to import
-
-<i>Active wallet is used for all transactions.</i>`,
-        SENSITIVITY_LEVELS.BALANCE,
-        keyboard
-      );
-    } else {
-      // Nessun wallet trovato - mostra opzione per crearne uno
-      // No wallet found - show option to create one
       const keyboard = new InlineKeyboard()
         .text("✨ Create Wallet", "wallet_create");
 
@@ -1028,9 +1299,113 @@ Create your first wallet to:
 🦊 Compatible with MetaMask!`,
         { parse_mode: "Markdown", reply_markup: keyboard }
       );
+      return;
+    }
+
+    // Determina quale wallet mostrare
+    // Determine which wallet to display
+    let selectedWallet = wallets.find(w => w.isActive) || wallets[0];
+    if (viewWalletId) {
+      const found = wallets.find(w => w.id === viewWalletId);
+      if (found) selectedWallet = found;
+    }
+
+    // Aggiorna la sessione con il wallet attivo (solo se stiamo guardando l'attivo)
+    // Update session with active wallet (only if viewing the active one)
+    if (selectedWallet.isActive) {
+      const session = sessionStore.getOrCreate(userId, ctx.from?.username, ctx.from?.first_name);
+      session.walletAddress = selectedWallet.address;
+      sessionStore.save(session);
+    }
+
+    // Recupera prezzo ETH e statistiche wallet in parallelo
+    // Fetch ETH price and wallet stats in parallel
+    const [ethPrice, walletStats] = await Promise.all([
+      getEthPriceUSD(),
+      getWalletStats(selectedWallet.address),
+    ]);
+
+    if (loadingMsg) {
+      try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
+    }
+
+    const balance = parseFloat(selectedWallet.balanceFormatted);
+    const usdValue = ethPrice ? (balance * ethPrice).toFixed(2) : null;
+
+    // Costruisci il messaggio principale
+    // Build the main message
+    let message = `👛 <b>${selectedWallet.name}</b>`;
+    if (selectedWallet.isActive) message += ` <i>(active)</i>`;
+    message += `\n\n`;
+
+    // Saldo ETH + valore USD
+    // ETH balance + USD value
+    message += `💰 <b>${selectedWallet.balanceFormatted} ETH</b>`;
+    if (usdValue) message += ` <i>(~$${usdValue})</i>`;
+    message += `\n`;
+
+    // Statistiche NFT
+    // NFT statistics
+    message += `🎴 NFTs Held: <b>${walletStats.nftsHeld}</b>\n`;
+    message += `📋 Listed: <b>${walletStats.nftsListed}</b>\n`;
+    message += `💵 Sales: <b>${walletStats.totalSalesETH} ETH</b>\n`;
+    message += `👑 Royalties: <i>Coming soon</i>\n`;
+
+    // Tastiera con azioni wallet
+    // Keyboard with wallet actions
+    const keyboard = new InlineKeyboard()
+      .text("💰 Deposit", "wallet_deposit")
+      .text("📤 Withdraw", "wallet_withdraw")
+      .row()
+      .text("🔐 Export / Backup", "wallet_export_menu")
+      .text("⛽ Get Test ETH", "wallet_faucet_info")
+      .row()
+      .url("📊 Etherscan", getEtherscanLink("address", selectedWallet.address))
+      .row();
+
+    // Se si sta guardando un wallet non attivo, mostra bottone "Set as Active"
+    // If viewing a non-active wallet, show "Set as Active" button
+    if (!selectedWallet.isActive) {
+      keyboard.text("✅ Set as Active", `wallet_select_${selectedWallet.id}`).row();
+    }
+
+    // Mostra gli altri wallet come pulsanti cliccabili
+    // Show other wallets as clickable buttons
+    const otherWallets = wallets.filter(w => w.id !== selectedWallet.id);
+    if (otherWallets.length > 0) {
+      for (const w of otherWallets) {
+        keyboard.text(
+          `${w.name} · ${w.balanceFormatted} ETH`,
+          `wallet_view_${w.id}`
+        );
+      }
+      keyboard.row();
+    }
+
+    keyboard.text("➕ New Wallet", "wallet_create_new")
+      .text("🏠 Menu", "main_menu");
+
+    if (editMessage) {
+      // Aggiorna il messaggio esistente (switch tra wallet)
+      // Update the existing message (switching between wallets)
+      await ctx.editMessageText(message, {
+        parse_mode: "HTML",
+        reply_markup: keyboard,
+      });
+    } else {
+      await sendSensitiveMessage(
+        bot,
+        ctx.chat!.id,
+        message,
+        SENSITIVITY_LEVELS.BALANCE,
+        keyboard
+      );
     }
   } catch (error) {
     console.error("Error in showWallet:", error);
+    if (loadingMsg) {
+      try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
+    }
     await ctx.reply("❌ Error loading wallets. Please try again later.");
   }
 }

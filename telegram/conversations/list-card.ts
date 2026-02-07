@@ -463,8 +463,8 @@ Proceed with listing?`,
       const nftForApprove = new ethers.Contract(nftContract, approveABI, userSigner);
 
       const approveTx = await nftForApprove.setApprovalForAll(CONTRACTS.MARKETPLACE, true);
-      const approveReceipt = await approveTx.wait();
-      if (approveReceipt.status !== 1) {
+      const approveReceipt = await approveTx.wait(1, 120_000);
+      if (!approveReceipt || approveReceipt.status !== 1) {
         await ctx.reply("❌ Marketplace approval transaction failed. Please try again.", { reply_markup: getMainMenuKeyboard() });
         return;
       }
@@ -500,7 +500,7 @@ Proceed with listing?`,
     // Il contratto deployato usa listNFT a 3 parametri (senza imageURI).
     // The deployed contract uses 3-parameter listNFT (without imageURI).
     const listTx = await marketplaceWithSigner.listNFT(nftContract, selectedDraft.mintedTokenId, priceWei);
-    const receipt = await listTx.wait();
+    const receipt = await listTx.wait(1, 120_000);
 
     // Cerca l'evento NFTListed nei log della transazione per il listing ID
     // Search for NFTListed event in transaction logs for the listing ID

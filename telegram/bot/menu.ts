@@ -1,4 +1,5 @@
 import { InlineKeyboard } from "grammy";
+import { getRotatingTip } from "../services/promo.js";
 
 // =============================================================================
 // MENU PRINCIPALE - Tastiera inline del bot (senza Pack/Battle)
@@ -18,7 +19,7 @@ import { InlineKeyboard } from "grammy";
 // Riga 1 / Row 1: [My Cards] [Create Card]  - Gestione carte / Card management
 // Riga 2 / Row 2: [Marketplace] [Wallet]     - Commercio e finanze / Trading & finance
 // Riga 3 / Row 3: [Contracts] [Security]     - Info tecniche e sicurezza / Tech info & security
-// Riga 4 / Row 4: [Help] [Clear Chat]        - Supporto e utilita' / Support & utilities
+// Riga 4 / Row 4: [Help] [Share]              - Supporto e condivisione / Support & sharing
 //
 // Funzionalita' rimosse (disabilitate per ora):
 // Features removed (disabled for now):
@@ -70,10 +71,10 @@ import { InlineKeyboard } from "grammy";
  * - "Help" (action_help): Mostra la guida all'uso del bot.
  *   Shows the bot usage guide.
  *
- * - "Clear Chat" (action_clear): Pulisce la chat eliminando messaggi recenti.
- *   Clears the chat by deleting recent messages.
- *   Utile per mantenere la chat pulita e leggibile.
- *   Useful for keeping the chat clean and readable.
+ * - "Share" (action_share): Mostra messaggio promozionale con link condivisibile.
+ *   Shows promotional message with shareable link.
+ *   Invia GIF Pokemon e link di invito personalizzato.
+ *   Sends Pokemon GIF and personalized invite link.
  *
  * I pulsanti sono organizzati in righe da 2 usando .row() per separare le righe.
  * Buttons are organized in rows of 2 using .row() to separate rows.
@@ -93,5 +94,51 @@ export function getMainMenuKeyboard(): InlineKeyboard {
     .text("🔒 Security", "action_security")
     .row()
     .text("ℹ️ Help", "action_help")
-    .text("🧹 Clear Chat", "action_clear");
+    .text("📤 Share", "action_share");
+}
+
+/**
+ * Restituisce il messaggio di benvenuto/menu principale del bot.
+ * Returns the bot's welcome/main menu message.
+ *
+ * Usato sia da /start che dal pulsante "Menu" per mostrare sempre
+ * la stessa interfaccia ricca con emoji Pokemon e descrizione completa.
+ *
+ * Used by both /start and the "Menu" button to always show the same
+ * rich interface with Pokemon emoji and full description.
+ */
+export function getWelcomeMessage(firstName?: string): string {
+  const greeting = firstName ? `, ${firstName}` : "";
+
+  return (
+    `⚡ *PokeDEX NFT* ⚡\n` +
+    `━━━━━━━━━━━━━━━━━━━━━\n\n` +
+
+    `🎮 Welcome${greeting}!\n` +
+    `Gotta Mint 'Em All!\n\n` +
+
+    `🔥💧🌿⚡❄️🐉👻🔮🧚⚙️\n\n` +
+
+    `🎴 *Create* unique Pokemon cards\n` +
+    `⚔️ Set custom stats: HP, ATK, DEF, SPD\n` +
+    `🛒 *Trade* on the decentralized marketplace\n` +
+    `💰 *Earn* royalties on every resale\n` +
+    `👛 Built-in wallet, no MetaMask needed\n\n` +
+
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📊 *5 Rarities*\n` +
+    `⚪ Common \u2022 🟢 Uncommon \u2022 🔵 Rare\n` +
+    `🟣 Ultra Rare \u2022 🟡 Legendary\n\n` +
+
+    `🌍 *18 Pokemon Types*\n` +
+    `From Fire 🔥 to Dragon 🐉 to Fairy 🧚\n\n` +
+
+    `━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📡 Network: Sepolia Testnet\n` +
+    `🔒 We *never* ask for private keys!\n\n` +
+
+    `${getRotatingTip()}\n\n` +
+
+    `👇 *Choose your adventure!* 👇`
+  );
 }

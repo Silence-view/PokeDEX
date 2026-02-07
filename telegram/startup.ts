@@ -65,6 +65,7 @@ import { registerCallbackHandlers } from "./handlers/callbacks.js";
 import { registerMessageHandlers } from "./handlers/messages.js";
 import { registerErrorHandler } from "./handlers/errors.js";
 import { startSaleNotifications } from "./services/sale-notifications.js";
+import { startScheduler } from "./services/scheduler.js";
 
 // =============================================================================
 // REGISTRAZIONE COMANDI TELEGRAM
@@ -300,6 +301,7 @@ export async function start() {
   // sellers via Telegram when one of their cards is purchased.
   // ---------------------------------------------------------------------------
   startSaleNotifications();
+  startScheduler();
 
   console.log("━".repeat(60));
   console.log("🚀 Bot is running!");

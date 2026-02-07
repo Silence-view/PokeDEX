@@ -140,7 +140,7 @@ export function registerWalletCallbacks() {
         const activeIcon = w.isActive ? "✅ " : "";
         keyboard.text(`${activeIcon}${w.name}`, `wallet_select_${w.id}`).row();
       }
-      keyboard.text("🔙 Back", "action_wallet");
+      keyboard.text("🔙 Back", "wallet_dismiss");
 
       await ctx.reply(
         `🔄 <b>Switch Wallet</b>
@@ -164,6 +164,7 @@ Select wallet to use:`,
    */
   bot.callbackQuery(/^wallet_select_/, async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     const userId = ctx.from?.id;
     if (!userId) return;
 
@@ -171,9 +172,13 @@ Select wallet to use:`,
     // Extract wallet ID from callback_data
     const walletId = ctx.callbackQuery.data.replace("wallet_select_", "");
 
+    const loadingMsg = await ctx.reply("🔄 Switching wallet...");
+
     try {
       const walletManager = getWalletManager();
       const success = walletManager.setActiveWallet(userId, walletId);
+
+      try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
 
       if (success) {
         // Aggiorna anche la sessione con il nuovo indirizzo wallet
@@ -191,6 +196,7 @@ Select wallet to use:`,
       }
     } catch (error) {
       console.error("Error switching wallet:", error);
+      try { await ctx.api.deleteMessage(ctx.chat!.id, loadingMsg.message_id); } catch {}
       await ctx.reply("❌ Error switching wallet.");
     }
   });
@@ -232,8 +238,15 @@ Send ETH to this address (Sepolia Testnet):
 
 💡 <b>Current balance:</b> ${walletInfo.balanceFormatted} ETH
 
-⚠️ Make sure to send ONLY on Sepolia network!`,
-        SENSITIVITY_LEVELS.DEPOSIT_ADDRESS
+⚠️ Make sure to send ONLY on Sepolia network!
+
+🆓 <b>Need free test ETH?</b>
+Use the faucet button below instead of sending from another wallet.`,
+        SENSITIVITY_LEVELS.DEPOSIT_ADDRESS,
+        new InlineKeyboard()
+          .text("⛽ Get Free Test ETH", "wallet_faucet_info")
+          .row()
+          .text("🔙 Back to Wallet", "wallet_dismiss")
       );
     } catch (error) {
       console.error("Error showing deposit:", error);
@@ -294,8 +307,12 @@ Send ETH to this address (Sepolia Testnet):
 
 💰 Available balance: <b>${walletInfo.balanceFormatted} ETH</b>
 
-Send the destination address:`,
-        { parse_mode: "HTML" }
+Send the destination address (or cancel):`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .text("❌ Cancel", "wallet_cancel_withdraw"),
+        }
       );
     } catch (error) {
       console.error("Error initiating withdraw:", error);
@@ -322,6 +339,7 @@ Send the destination address:`,
    */
   bot.callbackQuery("wallet_export_key", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     const userId = ctx.from?.id;
     if (!userId) return;
 
@@ -386,6 +404,7 @@ Send the destination address:`,
    */
   bot.callbackQuery("wallet_export_mnemonic", async (ctx) => {
     await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
     const userId = ctx.from?.id;
     if (!userId) return;
 
@@ -451,6 +470,230 @@ You can still use the private key to import into MetaMask.`,
     } catch (error) {
       console.error("Error exporting mnemonic:", error);
       await ctx.reply("❌ Error exporting seed phrase.");
+    }
+  });
+
+  // ===========================================================================
+  // VIEW WALLET - Mostra i dettagli di un wallet specifico
+  // VIEW WALLET - Show details for a specific wallet
+  // ===========================================================================
+
+  /**
+   * Mostra la vista dettagliata di un wallet specifico.
+   * Shows the detailed view of a specific wallet.
+   *
+   * callback_data: "wallet_view_{walletId}" (regex match)
+   * Chiama showWallet(ctx, walletId) per mostrare la vista ricca.
+   * Calls showWallet(ctx, walletId) to show the rich view.
+   */
+  bot.callbackQuery(/^wallet_view_/, async (ctx) => {
+    await ctx.answerCallbackQuery("🔄 Loading...");
+    const walletId = ctx.callbackQuery.data.replace("wallet_view_", "");
+    await showWallet(ctx, walletId, true);
+  });
+
+  // ===========================================================================
+  // CANCEL WITHDRAW - Annulla il flusso di prelievo
+  // CANCEL WITHDRAW - Cancel the withdrawal flow
+  // ===========================================================================
+
+  /**
+   * Annulla il flusso di prelievo e ripristina lo stato idle.
+   * Cancels the withdrawal flow and resets state to idle.
+   *
+   * callback_data: "wallet_cancel_withdraw"
+   */
+  bot.callbackQuery("wallet_cancel_withdraw", async (ctx) => {
+    await ctx.answerCallbackQuery("Withdrawal cancelled");
+    try { await ctx.deleteMessage(); } catch {}
+    const userId = ctx.from?.id;
+    if (userId) {
+      sessionStore.setState(userId, "idle");
+    }
+  });
+
+  // ===========================================================================
+  // EXPORT MENU - Sotto-menu per esportazione chiavi
+  // EXPORT MENU - Sub-menu for key export
+  // ===========================================================================
+
+  /**
+   * Mostra il sotto-menu per esportare chiave privata o seed phrase.
+   * Shows the sub-menu for exporting private key or seed phrase.
+   *
+   * callback_data: "wallet_export_menu"
+   * Aggiunge un livello di disclosure progressiva: l'utente deve fare un tap
+   * extra prima di raggiungere le operazioni sensibili.
+   *
+   * Adds a level of progressive disclosure: the user must make one extra tap
+   * before reaching sensitive operations.
+   */
+  bot.callbackQuery("wallet_export_menu", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await ctx.reply(
+      `🔐 <b>Export / Backup</b>
+
+Choose what to export. These are sensitive operations — the data will be shown once and auto-deleted.
+
+⚠️ <b>Never share your keys with anyone!</b>`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("🔑 Private Key", "wallet_confirm_export_key")
+          .row()
+          .text("🌱 Seed Phrase", "wallet_confirm_export_mnemonic")
+          .row()
+          .text("🔙 Back to Wallet", "wallet_dismiss"),
+      }
+    );
+  });
+
+  /**
+   * Chiede conferma prima di mostrare la chiave privata.
+   * Asks for confirmation before showing the private key.
+   *
+   * callback_data: "wallet_confirm_export_key"
+   */
+  bot.callbackQuery("wallet_confirm_export_key", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
+    await ctx.reply(
+      `⚠️ <b>Security Warning</b>
+
+You are about to view your <b>private key</b>.
+
+Anyone who sees this key can steal all your funds and NFTs. Make sure:
+• No one is looking at your screen
+• You are not screen-sharing
+• You will save it in a secure offline location
+
+The message will auto-delete in <b>30 seconds</b>.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ I understand, show key", "wallet_export_key")
+          .row()
+          .text("❌ Cancel", "wallet_dismiss"),
+      }
+    );
+  });
+
+  /**
+   * Chiede conferma prima di mostrare la seed phrase.
+   * Asks for confirmation before showing the seed phrase.
+   *
+   * callback_data: "wallet_confirm_export_mnemonic"
+   */
+  bot.callbackQuery("wallet_confirm_export_mnemonic", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
+    await ctx.reply(
+      `⚠️ <b>Security Warning</b>
+
+You are about to view your <b>seed phrase (12 words)</b>.
+
+Anyone who sees these words can steal all your funds and NFTs. Make sure:
+• No one is looking at your screen
+• You are not screen-sharing
+• You will write them on paper, NOT digitally
+
+The message will auto-delete in <b>60 seconds</b>.`,
+      {
+        parse_mode: "HTML",
+        reply_markup: new InlineKeyboard()
+          .text("✅ I understand, show phrase", "wallet_export_mnemonic")
+          .row()
+          .text("❌ Cancel", "wallet_dismiss"),
+      }
+    );
+  });
+
+  // ===========================================================================
+  // DISMISS - Cancella il messaggio transitorio corrente
+  // DISMISS - Deletes the current transient message
+  // ===========================================================================
+
+  /**
+   * Cancella il messaggio su cui il bottone e' stato premuto.
+   * Deletes the message the button was pressed on.
+   *
+   * callback_data: "wallet_dismiss"
+   * Usato come "Back" / "Cancel" su tutti i messaggi transitori del wallet
+   * (export menu, security warnings, switch list, deposit, faucet).
+   * Il wallet view principale resta visibile sopra.
+   *
+   * Used as "Back" / "Cancel" on all wallet transient messages
+   * (export menu, security warnings, switch list, deposit, faucet).
+   * The main wallet view remains visible above.
+   */
+  bot.callbackQuery("wallet_dismiss", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    try { await ctx.deleteMessage(); } catch {}
+  });
+
+  // ===========================================================================
+  // FAUCET - Informazioni per ottenere test ETH
+  // FAUCET - Information for getting test ETH
+  // ===========================================================================
+
+  /**
+   * Mostra istruzioni dettagliate per ottenere test ETH dal faucet Sepolia.
+   * Shows detailed instructions for getting test ETH from the Sepolia faucet.
+   *
+   * callback_data: "wallet_faucet_info"
+   * Mostra l'indirizzo wallet (copiabile), istruzioni passo-passo, e un bottone
+   * URL che apre direttamente il faucet Google Cloud nel browser dell'utente.
+   *
+   * Shows the wallet address (copyable), step-by-step instructions, and a URL
+   * button that opens the Google Cloud faucet directly in the user's browser.
+   */
+  bot.callbackQuery("wallet_faucet_info", async (ctx) => {
+    await ctx.answerCallbackQuery();
+    const userId = ctx.from?.id;
+    if (!userId) return;
+
+    try {
+      const walletManager = getWalletManager();
+      const walletInfo = await walletManager.getWallet(userId);
+
+      if (!walletInfo) {
+        await ctx.reply("❌ Wallet not found. Create one first!", {
+          reply_markup: new InlineKeyboard().text("👛 Create Wallet", "wallet_create"),
+        });
+        return;
+      }
+
+      await ctx.reply(
+        `⛽ <b>Get Free Test ETH</b>
+
+<b>Your Wallet Address:</b>
+<code>${walletInfo.address}</code>
+
+🎯 <b>How to get test ETH:</b>
+
+1️⃣ Click "Open Faucet" below
+2️⃣ Sign in with Google (required)
+3️⃣ Paste your wallet address (copied above)
+4️⃣ Select "Sepolia" network
+5️⃣ Click "Receive"
+
+⏱️ You'll receive ~0.05 ETH in about 30 seconds
+
+💡 <b>What is test ETH?</b>
+Sepolia ETH has no real value — it's only for testing. You can't sell it or withdraw it to exchanges.
+
+🔁 You can request again after 24 hours.`,
+        {
+          parse_mode: "HTML",
+          reply_markup: new InlineKeyboard()
+            .url("🌐 Open Faucet", "https://cloud.google.com/application/web3/faucet/ethereum/sepolia")
+            .row()
+            .text("🔙 Back to Wallet", "wallet_dismiss"),
+        }
+      );
+    } catch (error) {
+      console.error("Error showing faucet info:", error);
+      await ctx.reply("❌ Error. Please try again.");
     }
   });
 
@@ -544,17 +787,22 @@ You can import this wallet into MetaMask using the seed phrase below.`,
       .text("🗑️ Delete Now", "delete_this_message")
   );
 
-  // Suggerimenti per i passi successivi
-  // Suggestions for next steps
+  // Suggerimenti per i passi successivi con faucet
+  // Suggestions for next steps with faucet
   await ctx.reply(
     `💡 <b>Next steps:</b>
 1. Save the seed phrase in a secure location
-2. Deposit Sepolia ETH to create cards
-3. Start creating your NFT cards!`,
+2. Get free test ETH from the faucet
+3. Start creating your NFT cards!
+
+⛽ <b>Need test ETH?</b>
+This is testnet money (not real). Click below to get free Sepolia ETH for creating and trading cards.`,
     {
       parse_mode: "HTML",
       reply_markup: new InlineKeyboard()
-        .text("📥 Deposit ETH", "wallet_deposit")
+        .text("⛽ Get Free Test ETH", "wallet_faucet_info")
+        .row()
+        .text("📥 Manual Deposit", "wallet_deposit")
         .text("🎨 Create Card", "action_create_card")
         .row()
         .text("👛 Go to Wallet", "action_wallet")
