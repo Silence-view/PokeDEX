@@ -2,8 +2,63 @@ import { describe, it } from "node:test";
 import hre from "hardhat";
 import { getAddress, parseEther, formatEther } from "viem";
 import assert from "node:assert/strict";
+import type { GetContractReturnType, PublicClient, WalletClient } from "viem";
 
 const {viem, networkHelpers} =  await hre.network.connect();
+
+// Type for the deployed contract
+type PokeDEXCard = Awaited<ReturnType<typeof viem.deployContract<"PokeDEXCard">>>;
+
+// Helper types for event args with named properties
+interface CardMintedEvent {
+  tokenId: bigint;
+  owner: `0x${string}`;
+  pokemonType: number;
+  rarity: number;
+}
+
+interface CardStatsUpdatedEvent {
+  tokenId: bigint;
+  newExperience: number;
+}
+
+interface CardTransferredEvent {
+  tokenId: bigint;
+  from: `0x${string}`;
+  to: `0x${string}`;
+  tradeCount: number;
+}
+
+// Helper function to convert event args array to named object
+function parseCardMintedArgs(args: Record<string, unknown> | readonly unknown[]): CardMintedEvent {
+  // Viem returns args as either an array or object, we need to handle array case
+  const argsArray = Array.isArray(args) ? args : Object.values(args);
+  return {
+    tokenId: argsArray[0] as bigint,
+    owner: argsArray[1] as `0x${string}`,
+    pokemonType: argsArray[2] as number,
+    rarity: argsArray[3] as number,
+  };
+}
+
+function parseCardStatsUpdatedArgs(args: readonly unknown[]): CardStatsUpdatedEvent {
+  return {
+    tokenId: args[0] as bigint,
+    newExperience: args[1] as number,
+  };
+}
+
+function parseCardTransferredArgs(args: Record<string, unknown> | readonly unknown[]): CardTransferredEvent {
+  // Viem returns args as either an array or object, we need to handle array case
+  const argsArray = Array.isArray(args) ? args : Object.values(args);
+  return {
+    tokenId: argsArray[0] as bigint,
+    from: argsArray[1] as `0x${string}`,
+    to: argsArray[2] as `0x${string}`,
+    tradeCount: argsArray[3] as number,
+  };
+}
+
 
 describe("PokeDEXCard", async function () {
   // Enums matching the contract
@@ -36,8 +91,28 @@ describe("PokeDEXCard", async function () {
     Legendary: 4
   };
 
+  // Type for card stats
+  interface CardStats {
+    pokemonType: number;
+    rarity: number;
+    generation: number;
+    hp: number;
+    attack: number;
+    defense: number;
+    speed: number;
+    experience: number;
+  }
+
+  // Type for card metrics
+  interface CardMetrics {
+    holderDays: number,
+    tradeCount: number,
+    isVeteranCard: boolean,
+    lastSalePrice: number
+  }
+
   // Helper function to create sample card stats
-  function createCardStats(overrides = {}) {
+  function createCardStats(overrides: Partial<CardStats> = {}) {
     return {
       pokemonType: overrides.pokemonType ?? PokemonType.Fire,
       rarity: overrides.rarity ?? Rarity.Common,
@@ -49,6 +124,8 @@ describe("PokeDEXCard", async function () {
       experience: overrides.experience ?? 0
     };
   }
+
+  
 
   // Fixture for deploying the contract
   async function deployPokeDEXCardFixture() {
@@ -115,7 +192,7 @@ describe("PokeDEXCard", async function () {
         async () => {
           await viem.deployContract("PokeDEXCard", [zeroAddress]);
         },
-        (error) => {
+        (error: Error) => {
           assert.match(error.message, /Invalid admin address/);
           return true;
         }
@@ -153,14 +230,16 @@ describe("PokeDEXCard", async function () {
         const logs = await pokeDEXCard.getEvents.CardMinted();
         const mintEvent = logs.find(log => log.transactionHash === hash);
 
-        
-        assert.ok(mintEvent, "CardMinted event should be emitted");
-        assert.equal(mintEvent.args.tokenId, 1n);
-        assert.equal(mintEvent.args.owner.toLowerCase(), user1.account.address.toLowerCase());
-        assert.equal(mintEvent.args.pokemonType, stats.pokemonType);
-        assert.equal(mintEvent.args.rarity, stats.rarity);
 
-        const owner = await pokeDEXCard.read.ownerOf([1n]);
+        // Parse event args to named properties
+        const eventArgs = parseCardMintedArgs(mintEvent!.args);
+        assert.ok(mintEvent, "CardMinted event should be emitted");
+        assert.equal(eventArgs.tokenId, 1n);
+        assert.equal(eventArgs.owner.toLowerCase(), user1.account.address.toLowerCase());
+        assert.equal(eventArgs.pokemonType, stats.pokemonType);
+        assert.equal(eventArgs.rarity, stats.rarity);
+
+        const owner = await pokeDEXCard.read.ownerOf([1n]) as `0x${string}`;
         const tokenUri = await pokeDEXCard.read.tokenURI([1n]);
         
         assert.equal(owner.toLowerCase(), user1.account.address.toLowerCase());
@@ -185,7 +264,7 @@ describe("PokeDEXCard", async function () {
           { account: minter.account }
         );
         
-        const retrievedStats = await pokeDEXCard.read.getCardStats([1n]);
+        const retrievedStats = await pokeDEXCard.read.getCardStats([1n]) as CardStats;
 
         assert.equal(retrievedStats.pokemonType, stats.pokemonType);
         assert.equal(retrievedStats.rarity, stats.rarity);
@@ -223,7 +302,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Cannot mint to zero address/);
             return true;
           }
@@ -241,7 +320,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /URI cannot be empty/);
             return true;
           }
@@ -260,7 +339,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Invalid HP/);
             return true;
           }
@@ -275,7 +354,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Invalid HP/);
             return true;
           }
@@ -290,7 +369,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Invalid generation/);
             return true;
           }
@@ -305,7 +384,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Invalid generation/);
             return true;
           }
@@ -329,7 +408,7 @@ describe("PokeDEXCard", async function () {
       });
 
       it("Should increment token IDs correctly", async function () {
-        const { pokeDEXCard, publicClient, minter, user1 } = await networkHelpers.loadFixture(deployPokeDEXCardFixture);
+        const { pokeDEXCard, minter, user1 } = await networkHelpers.loadFixture(deployPokeDEXCardFixture);
         const stats1 = createCardStats({ hp: 100 });
         const stats2 = createCardStats({ hp: 150 });
 
@@ -343,7 +422,9 @@ describe("PokeDEXCard", async function () {
         const logs1 = await pokeDEXCard.getEvents.CardMinted();
         const event1 = logs1.find(log => log.transactionHash === hash1);
         assert.ok(event1, "First CardMinted event should be emitted");
-        assert.equal(event1.args.tokenId, 1n); // First token ID should be 1
+
+        const event1Args = parseCardMintedArgs(event1!.args);
+        assert.equal(event1Args.tokenId, 1n); // First token ID should be 1
 
         // Mint second card
         const hash2 = await pokeDEXCard.write.mintCard(
@@ -355,22 +436,24 @@ describe("PokeDEXCard", async function () {
         const logs2 = await pokeDEXCard.getEvents.CardMinted();
         const event2 = logs2.find(log => log.transactionHash === hash2);
         assert.ok(event2, "Second CardMinted event should be emitted");
-        assert.equal(event2.args.tokenId, 2n); // Second token ID should be 2
+        
+        const event2Args = parseCardMintedArgs(event2!.args);
+        assert.equal(event2Args.tokenId, 2n); // Second token ID should be 2
 
         // Verify both cards exist and belong to user1
-        const owner1 = await pokeDEXCard.read.ownerOf([1n]);
-        const owner2 = await pokeDEXCard.read.ownerOf([2n]);
+        const owner1 = await pokeDEXCard.read.ownerOf([1n]) as `0x${string}`;
+        const owner2 = await pokeDEXCard.read.ownerOf([2n]) as `0x${string}`;
         
         assert.equal(owner1.toLowerCase(), user1.account.address.toLowerCase());
         assert.equal(owner2.toLowerCase(), user1.account.address.toLowerCase());
 
         // Verify different stats were stored
-        const retrievedStats1 = await pokeDEXCard.read.getCardStats([1n]);
-        const retrievedStats2 = await pokeDEXCard.read.getCardStats([2n]);
+        const retrievedStats1 = await pokeDEXCard.read.getCardStats([1n]) as CardStats;
+        const retrievedStats2 = await pokeDEXCard.read.getCardStats([2n]) as CardStats;
         
         assert.equal(retrievedStats1.hp, 100);
         assert.equal(retrievedStats2.hp, 150);
-        assert.notEqual(event1.args.tokenId, event2.args.tokenId);
+        assert.notEqual(event1Args.tokenId, event2Args.tokenId);
         assert.equal(await pokeDEXCard.read.totalSupply(), 2n);
     });
 
@@ -393,18 +476,18 @@ describe("PokeDEXCard", async function () {
         );
 
         // Check that cards were minted
-        const owner1 = await pokeDEXCard.read.ownerOf([1n]);
-        const owner2 = await pokeDEXCard.read.ownerOf([2n]);
-        const owner3 = await pokeDEXCard.read.ownerOf([3n]);
+        const owner1 = await pokeDEXCard.read.ownerOf([1n]) as `0x${string}`;
+        const owner2 = await pokeDEXCard.read.ownerOf([2n]) as `0x${string}`;
+        const owner3 = await pokeDEXCard.read.ownerOf([3n]) as `0x${string}`;
         
         assert.equal(owner1.toLowerCase(), user1.account.address.toLowerCase());
         assert.equal(owner2.toLowerCase(), user1.account.address.toLowerCase());
         assert.equal(owner3.toLowerCase(), user1.account.address.toLowerCase());
 
         // Check stats
-        const stats1 = await pokeDEXCard.read.getCardStats([1n]);
-        const stats2 = await pokeDEXCard.read.getCardStats([2n]);
-        const stats3 = await pokeDEXCard.read.getCardStats([3n]);
+        const stats1 = await pokeDEXCard.read.getCardStats([1n]) as CardStats;
+        const stats2 = await pokeDEXCard.read.getCardStats([2n]) as CardStats;
+        const stats3 = await pokeDEXCard.read.getCardStats([3n]) as CardStats;
 
         assert.equal(stats1.hp, 100);
         assert.equal(stats2.hp, 120);
@@ -424,7 +507,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Arrays length mismatch/);
             return true;
           }
@@ -441,7 +524,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Invalid batch size/);
             return true;
           }
@@ -461,7 +544,7 @@ describe("PokeDEXCard", async function () {
               { account: minter.account }
             );
           },
-          (error) => {
+          (error: Error) => {
             assert.match(error.message, /Invalid batch size/);
             return true;
           }
@@ -493,11 +576,12 @@ describe("PokeDEXCard", async function () {
       const transferEvent = logs.find(log => log.transactionHash === hash);
       
       assert.ok(transferEvent, "CardTransferred event should be emitted");
-      // Access event args by array index: [tokenId, from, to, tradeCount]
-      assert.equal(transferEvent.args.tokenId, 1n); // tokenId
-      assert.equal(transferEvent.args.from?.toLowerCase(), user1.account.address.toLowerCase()); // from
-      assert.equal(transferEvent.args.to?.toLowerCase(), user2.account.address.toLowerCase()); // to
-      assert.equal(transferEvent.args.tradeCount, 1); // tradeCount
+      // Parse event args to named properties (non-null assertion safe after assert.ok)
+      const eventArgs = parseCardTransferredArgs(transferEvent!.args);
+      assert.equal(eventArgs.tokenId, 1n);
+      assert.equal(eventArgs.from?.toLowerCase(), user1.account.address.toLowerCase());
+      assert.equal(eventArgs.to?.toLowerCase(), user2.account.address.toLowerCase());
+      assert.equal(eventArgs.tradeCount, 1);
 
       const tradeCountAfter = await pokeDEXCard.read.getTradeCount([1n]);
       assert.equal(tradeCountAfter, 1);
@@ -543,7 +627,7 @@ describe("PokeDEXCard", async function () {
         { account: user1.account }
       );
       
-      const metricsAfter = await pokeDEXCard.read.getCardMetrics([1n]);
+      const metricsAfter = await pokeDEXCard.read.getCardMetrics([1n]) as CardMetrics;
       
       // After transfer, holder days should reset to 0
       assert.equal(metricsAfter.holderDays, 0n);
@@ -561,7 +645,7 @@ describe("PokeDEXCard", async function () {
       );
       
       // Initial metrics
-      let metrics = await pokeDEXCard.read.getCardMetrics([1n]);
+      let metrics = await pokeDEXCard.read.getCardMetrics([1n]) as CardMetrics;
       assert.equal(metrics.tradeCount, 0);
       assert.equal(metrics.holderDays, 0n);
       assert.equal(metrics.isVeteranCard, false);
@@ -569,7 +653,7 @@ describe("PokeDEXCard", async function () {
       // Advance time and check holder days
       await networkHelpers.time.increase(86400 * 35); // 35 days
       
-      metrics = await pokeDEXCard.read.getCardMetrics([1n]);
+      metrics = await pokeDEXCard.read.getCardMetrics([1n]) as CardMetrics;
       assert.equal(metrics.holderDays, 35n);
       assert.equal(metrics.isVeteranCard, true);
 
@@ -579,7 +663,7 @@ describe("PokeDEXCard", async function () {
         { account: user1.account }
       );
       
-      metrics = await pokeDEXCard.read.getCardMetrics([1n]);
+      metrics = await pokeDEXCard.read.getCardMetrics([1n]) as CardMetrics;
       assert.equal(metrics.tradeCount, 1);
       assert.equal(metrics.holderDays, 0n); // Reset after transfer
       assert.equal(metrics.isVeteranCard, false);
@@ -600,7 +684,7 @@ describe("PokeDEXCard", async function () {
         { account: marketplace.account }
       );
 
-      const metrics = await pokeDEXCard.read.getCardMetrics([1n]);
+      const metrics = await pokeDEXCard.read.getCardMetrics([1n]) as CardMetrics;
       assert.equal(metrics.lastSalePrice, salePrice);
     });
 
@@ -752,7 +836,7 @@ describe("PokeDEXCard", async function () {
         { account: user2.account }
       );
 
-      const owner = await pokeDEXCard.read.ownerOf([1n]);
+      const owner = await pokeDEXCard.read.ownerOf([1n]) as `0x${string}`;
       assert.equal(owner.toLowerCase(), user2.account.address.toLowerCase());
     });
 
@@ -775,7 +859,7 @@ describe("PokeDEXCard", async function () {
         { account: user2.account }
       );
 
-      const owner = await pokeDEXCard.read.ownerOf([1n]);
+      const owner = await pokeDEXCard.read.ownerOf([1n]) as `0x${string}`;
       assert.equal(owner.toLowerCase(), user2.account.address.toLowerCase());
     });
 
@@ -860,7 +944,7 @@ describe("PokeDEXCard", async function () {
         { account: statsUpdater.account }
       );
       
-      const updatedStats = await pokeDEXCard.read.getCardStats([1n]);
+      const updatedStats = await pokeDEXCard.read.getCardStats([1n]) as CardStats;
       assert.equal(updatedStats.experience, 1000000);
     });
 
